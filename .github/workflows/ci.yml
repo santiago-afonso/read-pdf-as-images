@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck poppler-utils ghostscript
+      - name: Lint shell script
+        run: |
+          shellcheck scripts/read-pdf-as-images
+      - name: Install CLI
+        run: |
+          make install
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Smoke test --help and --version
+        run: |
+          read-pdf-as-images --version
+          read-pdf-as-images --help | head -n 5
+      - name: Integration test using ghostscript-generated PDF
+        run: |
+          mkdir -p test-artifacts
+          cat > test.ps <<'PS'
+          %!
+          /Times-Roman findfont 24 scalefont setfont
+          72 700 moveto
+          (Hello PDF) show
+          showpage
+          PS
+          ps2pdf test.ps test.pdf
+          ls -l test.pdf
+          read-pdf-as-images test.pdf --pages "1"
+          grep '"path":' -n <(read-pdf-as-images test.pdf --pages "1" 2>&1 >/dev/null) || true
+          test -f "tmp/pdf_renders/test/page-001.png"
+          file "tmp/pdf_renders/test/page-001.png"
+
