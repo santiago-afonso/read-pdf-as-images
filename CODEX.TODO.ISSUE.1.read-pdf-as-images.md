@@ -1,6 +1,6 @@
-# CODEX TODO / PRD — Issue #514 — read-pdf-as-images
+# CODEX TODO / PRD — Issue #1 — read-pdf-as-images
 
-GitHub Issue: https://github.com/santiago-afonso/DRM_Policy_Platform/issues/514
+GitHub Issue: https://github.com/santiago-afonso/read-pdf-as-images/issues/1
 
 ## Context
 Codex often needs to visually read PDF documents in the CLI harness. Base64 streaming to stdout is unreliable (stdout is truncated in the harness), and the image attach tool expects filesystem paths. A tiny wrapper around Poppler is sufficient to rasterize selected PDF pages into images and emit a machine‑parsable manifest that Codex can immediately consume.
@@ -30,12 +30,12 @@ Codex often needs to visually read PDF documents in the CLI harness. Base64 stre
 
 ## Tasks (tracked and updated)
 - [x] Initialize repo
-- [x] Create GitHub Issue #514 (in DRM_Policy_Platform)
+- [x] Create GitHub Issue #1 (in read-pdf-as-images repo)
 - [x] Author PRD/TODO file
 - [x] Implement `scripts/read-pdf-as-images` per spec
 - [x] Add `--help` output with examples
 - [x] Validate against sample PDF (FY25 Theme Taxonomy)
-- [ ] Document minimal usage in README or within `--help`
+- [x] Document minimal usage in README or within `--help`
 - [ ] Optional: add `--version`
 
 ## Acceptance Criteria
