@@ -38,6 +38,11 @@ Codex often needs to visually read PDF documents in the CLI harness. Base64 stre
 - [x] Document minimal usage in README or within `--help`
 - [x] Add Makefile install/uninstall targets (default to ~/.local/bin)
 - [x] Optional: add `--version`
+- [x] Add README with install/usage/exit codes
+- [x] Add MIT LICENSE
+- [x] Add .gitignore for tmp/
+- [x] Add CI workflow (shellcheck + integration smoke test)
+- [x] Add CONTRIBUTING.md and Makefile lint/test targets
 
 ## Acceptance Criteria
 - Running `read-pdf-as-images "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --pages "1-3,6-8"` produces images under `tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/` with filenames like `page-001.png` and emits JSONL lines to stderr with the absolute/relative paths created.
