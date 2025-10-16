@@ -5,12 +5,16 @@ set -euo pipefail
 # Rasterize selected PDF pages to images and emit a JSONL manifest to stderr.
 # Defaults: PNG @ 220 DPI, output under tmp/pdf_renders/<filename>/page-<NNN>.png
 
+VERSION="0.1.0"
+
 usage() {
   cat <<'USAGE'
 read-pdf-as-images — render PDF pages to images and emit JSONL to stderr
 
 Usage:
   read-pdf-as-images <pdf> [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+  read-pdf-as-images --help | -h
+  read-pdf-as-images --version | -V
 
 Defaults:
   --format png
@@ -84,6 +88,7 @@ main() {
   while (( $#>0 )); do
     case "$1" in
       -h|--help) usage; exit 0 ;;
+      -V|--version) echo "read-pdf-as-images ${VERSION}"; exit 0 ;;
       --pages) shift || { usage >&2; exit 2; }; pages_spec=${1:-}; shift ;;
       --dpi) shift || { usage >&2; exit 2; }; dpi=${1:-}; shift ;;
       --format) shift || { usage >&2; exit 2; }; format=${1:-}; shift ;;
@@ -173,4 +178,3 @@ main() {
 }
 
 main "$@"
-
