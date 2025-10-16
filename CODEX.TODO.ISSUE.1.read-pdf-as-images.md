@@ -36,6 +36,7 @@ Codex often needs to visually read PDF documents in the CLI harness. Base64 stre
 - [x] Add `--help` output with examples
 - [x] Validate against sample PDF (FY25 Theme Taxonomy)
 - [x] Document minimal usage in README or within `--help`
+- [x] Add Makefile install/uninstall targets (default to ~/.local/bin)
 - [ ] Optional: add `--version`
 
 ## Acceptance Criteria
