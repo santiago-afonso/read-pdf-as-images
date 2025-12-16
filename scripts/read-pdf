@@ -416,12 +416,20 @@ PY
   local tmpdir
   tmpdir=$(mktemp -d -t read-pdf-text.XXXXXX)
   local tmp_text="${tmpdir}/text.md"
+  local tmp_err="${tmpdir}/text.stderr"
 
   if [ "$TEXT_ENGINE" = "markitdown" ]; then
+    # markitdown/pdfminer can emit noisy diagnostics (often benign) to stderr.
+    # Keep stdout clean (pseudo-XML only) by capturing stderr and only surfacing
+    # it if the conversion fails.
     if ! uv run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
       --engine markitdown \
       --expected-pages "$PDF_PAGES" \
-      "$PDF" >"$tmp_text"; then
+      "$PDF" >"$tmp_text" 2>"$tmp_err"; then
+      if [ -s "$tmp_err" ]; then
+        echo "Underlying engine stderr (markitdown):" >&2
+        cat "$tmp_err" >&2
+      fi
       runtime_err "markitdown (via uv) failed for: $PDF"
     fi
   else
