@@ -5,3 +5,10 @@ tmp/
 
 # beads (bd) local tracker state (commit only on beads-sync)
 .beads/
+
+# python artifacts
+__pycache__/
+*.pyc
+
+# legacy Codex TODO/PRD scratch (bd is canonical)
+CODEX.TODO*.md
