@@ -18,6 +18,7 @@ ${TOOL_NAME} — read PDFs as text or images for coding agents
 
 Usage:
   ${TOOL_NAME} <pdf> [--as-text] [--page-structure] [--doc-structure]
+  ${TOOL_NAME} <pdf> --toc [--page-structure] [--doc-structure]
   ${TOOL_NAME} <pdf> --as-raw-text
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
   ${TOOL_NAME} --help | -h
@@ -27,6 +28,10 @@ Modes:
   (default) / --as-text   Convert the PDF with pymupdf4llm and emit:
                           - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
                           - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
+  --toc                   Best-effort extraction of TOC/Index/List pages (English+Spanish) with heuristics
+                          (e.g., headings + lines ending in page numbers). Emits the same pseudo-XML wrapper
+                          as text mode but caps output to 5 pages. If no matches are found, prints plain
+                          guidance text (no pseudo-XML) for the agent to inspect the full document.
   --as-raw-text           Emit only the raw markdown output (no pseudo-XML).
   --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
 
@@ -115,6 +120,7 @@ PDF_SIZE_KB=0
 MODE="text"        # text | raw | images
 PAGE_STRUCTURE=false
 DOC_STRUCTURE=false
+TOC_MAX_PAGES=5
 
 # Image mode options
 PAGES_SPEC=""
@@ -125,6 +131,8 @@ OUTDIR=""
 CONVERSION_ENGINE=""
 PAGE_STRUCTURE_XML=""
 DOC_STRUCTURE_XML=""
+TOC_EXTRACTION_XML=""
+TOC_MATCHED_PAGES=""
 
 READ_PDF_TEXT_SCRIPT="${SCRIPT_DIR}/read_pdf_text.py"
 READ_PDF_STRUCTURE_SCRIPT="${SCRIPT_DIR}/read_pdf_structure.py"
@@ -246,6 +254,17 @@ emit_metadata() {
     fi
   fi
 
+  if [ "$MODE" = "toc" ]; then
+    if [ -n "$TOC_EXTRACTION_XML" ]; then
+      echo "$TOC_EXTRACTION_XML"
+    else
+      printf '  <toc-extraction best_effort="true" max_pages="%s" matched_pages="%s" note="%s" />\n' \
+        "$(xml_escape "$TOC_MAX_PAGES")" \
+        "$(xml_escape "$TOC_MATCHED_PAGES")" \
+        "heuristic-only; may miss TOC/Index pages (including ones not matched by regex/heuristics)"
+    fi
+  fi
+
   echo "</pdf-metadata>"
 }
 
@@ -253,15 +272,30 @@ emit_text_block() {
   local tmp_text=$1
   local char_count=$2
 
-  printf '<pdf-text format="%s" source="%s" lossy="%s" pages="%s" char_count="%s">\n' \
+  local extra_attrs=""
+  if [ "$MODE" = "toc" ]; then
+    extra_attrs=$(printf ' filter="%s" best_effort="%s" matched_pages="%s" max_pages="%s"' \
+      "toc" \
+      "true" \
+      "$(xml_escape "$TOC_MATCHED_PAGES")" \
+      "$(xml_escape "$TOC_MAX_PAGES")")
+  fi
+
+  printf '<pdf-text format="%s" source="%s" lossy="%s" pages="%s" char_count="%s"%s>\n' \
     "markdown" \
     "pymupdf4llm" \
     "true" \
     "$(xml_escape "$PDF_PAGES")" \
-    "$(xml_escape "$char_count")"
+    "$(xml_escape "$char_count")" \
+    "$extra_attrs"
   printf '<![CDATA[\n'
   printf '<!-- ORIGINAL_PAGES=%s; page boundaries are marked with \"<!-- PAGE n -->\" comments inserted by read_pdf_text.py. -->\n' \
     "$PDF_PAGES"
+  if [ "$MODE" = "toc" ]; then
+    printf '<!-- TOC_EXTRACTION_BEST_EFFORT=true; matched_pages=%s; max_pages=%s; may miss TOC/Index pages, including ones not matched by regex/heuristics. -->\n' \
+      "$TOC_MATCHED_PAGES" \
+      "$TOC_MAX_PAGES"
+  fi
   cat "$tmp_text"
   printf '\n]]>\n'
   printf '</pdf-text>\n'
@@ -382,6 +416,202 @@ PY
   local char_count
   char_count=$(wc -c < "$tmp_text" | tr -d ' ')
   emit_metadata "$char_count"
+  emit_text_block "$tmp_text" "$char_count"
+  rm -rf "$tmpdir"
+}
+
+toc_mode() {
+  CONVERSION_ENGINE="pymupdf4llm"
+  MODE="toc"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  gather_pdf_info "$PDF"
+
+  need_cmd uv
+
+  # Optional structural enrichment (same as text mode).
+  if [ "$PAGE_STRUCTURE" = true ] || [ "$DOC_STRUCTURE" = true ]; then
+    ensure_helper "$READ_PDF_STRUCTURE_SCRIPT" "read_pdf_structure.py"
+    local struct_json
+    if ! struct_json=$(uv run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
+      runtime_err "pymupdf4llm structure scan failed for: $PDF"
+    fi
+
+    if [ "$PAGE_STRUCTURE" = true ]; then
+      PAGE_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+out = []
+out.append("  <page-structure>")
+for p in data.get("pages", []):
+    idx = p.get("index")
+    if idx is None:
+        continue
+    out.append(
+        f'    <page index="{idx}" '
+        f'has_text="{str(bool(p.get("has_text"))).lower()}" '
+        f'word_count="{p.get("word_count", 0)}" '
+        f'image_count="{p.get("image_count", 0)}" '
+        f'table_count="{p.get("table_count", 0)}" />'
+    )
+out.append("  </page-structure>")
+print("\n".join(out))
+PY
+)
+    fi
+
+    if [ "$DOC_STRUCTURE" = true ]; then
+      DOC_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+import json
+import sys
+
+def esc(val: str) -> str:
+    return (
+        val.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+data = json.loads(sys.argv[1])
+out = []
+out.append("  <doc-structure>")
+
+out.append("    <bookmarks>")
+for b in data.get("bookmarks", []):
+    title = esc(str(b.get("title", "")))
+    page = b.get("page")
+    level = b.get("level")
+    if page is None or level is None:
+        continue
+    out.append(f'      <bookmark title="{title}" page="{page}" level="{level}" />')
+out.append("    </bookmarks>")
+
+out.append("    <links>")
+for l in data.get("links", []):
+    ltype = l.get("type")
+    from_page = l.get("from_page")
+    if from_page is None or ltype not in {"internal", "external"}:
+        continue
+    if ltype == "external":
+        uri = esc(str(l.get("uri", "")))
+        out.append(f'      <link type="external" from_page="{from_page}" uri="{uri}" />')
+    elif ltype == "internal":
+        to_page = l.get("to_page")
+        if to_page is None:
+            continue
+        out.append(f'      <link type="internal" from_page="{from_page}" to_page="{to_page}" />')
+out.append("    </links>")
+
+out.append("  </doc-structure>")
+print("\n".join(out))
+PY
+      )
+    fi
+  fi
+
+  ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
+
+  local tmpdir
+  tmpdir=$(mktemp -d -t read-pdf-toc.XXXXXX)
+  local tmp_text="${tmpdir}/toc.md"
+  local tmp_meta="${tmpdir}/toc_meta.json"
+
+  local code=0
+  if uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
+    --filter toc \
+    --toc-max-pages "$TOC_MAX_PAGES" \
+    --meta-json-out "$tmp_meta" \
+    "$PDF" >"$tmp_text"; then
+    :
+  else
+    code=$?
+    if [ "$code" -eq 4 ]; then
+      rm -rf "$tmpdir"
+      cat <<MSG
+No TOC/Index/List pages matched by best-effort heuristics.
+
+This is a best-effort regex/structure search and may miss a real Table of Contents / Índice / Index page.
+
+Next steps:
+- Read full text: read-pdf "$(printf '%s' "$PDF")"
+- Or render images: read-pdf "$(printf '%s' "$PDF")" --as-images --pages "1-10"
+MSG
+      return 0
+    fi
+    runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+  fi
+
+  if [ ! -s "$tmp_text" ]; then
+    rm -rf "$tmpdir"
+    cat <<MSG
+No TOC/Index/List pages matched by best-effort heuristics.
+
+This is a best-effort regex/structure search and may miss a real Table of Contents / Índice / Index page.
+
+Next steps:
+- Read full text: read-pdf "$(printf '%s' "$PDF")"
+- Or render images: read-pdf "$(printf '%s' "$PDF")" --as-images --pages "1-10"
+MSG
+    return 0
+  fi
+
+  local toc_full_char_count
+  toc_full_char_count=$(
+    python3 - "$tmp_meta" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+print(str(data.get("full_char_count", 0)))
+PY
+  )
+
+  TOC_MATCHED_PAGES=$(
+    python3 - "$tmp_meta" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+pages = data.get("selected_pages") or []
+print(",".join(str(p) for p in pages))
+PY
+  )
+
+  TOC_EXTRACTION_XML=$(python3 - "$TOC_MATCHED_PAGES" "$TOC_MAX_PAGES" <<'PY'
+import sys
+
+def esc(val: str) -> str:
+    return (
+        val.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+matched_pages = sys.argv[1]
+max_pages = sys.argv[2]
+print(
+    '  <toc-extraction best_effort="true" '
+    f'max_pages="{esc(max_pages)}" '
+    f'matched_pages="{esc(matched_pages)}" '
+    'note="heuristic-only; may miss TOC/Index pages (including ones not matched by regex/heuristics)" />'
+)
+PY
+)
+
+  local char_count
+  char_count=$(wc -c < "$tmp_text" | tr -d ' ')
+  emit_metadata "$toc_full_char_count"
   emit_text_block "$tmp_text" "$char_count"
   rm -rf "$tmpdir"
 }
@@ -583,6 +813,15 @@ parse_args() {
         MODE="images"
         shift
         ;;
+      --toc)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --toc, --as-text, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="toc"
+        shift
+        ;;
       --page-structure)
         PAGE_STRUCTURE=true
         shift
@@ -660,6 +899,7 @@ main() {
   parse_args "$@"
   case "$MODE" in
     text) text_mode ;;
+    toc) toc_mode ;;
     raw) raw_text_mode ;;
     images) images_mode ;;
     *)

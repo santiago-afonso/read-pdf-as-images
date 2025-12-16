@@ -12,6 +12,11 @@ Why: Codex/CLI agents need deterministic file paths to attach images *and* a rob
     - a header comment summarizing original page count,
     - explicit `<!-- PAGE n -->` markers inserted before each page chunk, and
     - optional `<page-structure>` / `<doc-structure>` blocks when requested.
+- TOC/index extraction (`--toc`, best-effort):
+  - Emits the same pseudo-XML wrapper as text mode (`<pdf-metadata>` + `<pdf-text>`), but with `<pdf-text>` containing only pages that look like a Table of Contents / Índice / Index / List of Figures / etc.
+  - Uses regex + simple structural heuristics (e.g., headings plus lines ending with page numbers / dot leaders). This can miss real TOC pages.
+  - Caps output to 5 pages.
+  - If no matches are found, prints plain guidance text (no pseudo-XML) so agents can fall back to full text or image rendering.
 - Raw text mode (`--as-raw-text`):
   - Emits only raw markdown output (no pseudo-XML), using the same `pymupdf4llm`-based converter (still includes `<!-- PAGE n -->` markers).
 - Images mode (`--as-images`):
@@ -53,6 +58,7 @@ make uninstall
 ## Usage
 ```
 read-pdf <pdf> [--as-text] [--page-structure] [--doc-structure]
+read-pdf <pdf> --toc [--page-structure] [--doc-structure]
 read-pdf <pdf> --as-raw-text
 read-pdf <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
 read-pdf --help | -h
