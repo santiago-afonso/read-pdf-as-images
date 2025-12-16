@@ -8,10 +8,12 @@ HELPER_SCRIPTS := scripts/read_pdf_text.py scripts/read_pdf_structure.py
 HELPER_TARGETS := $(addprefix $(BINDIR)/,$(notdir $(HELPER_SCRIPTS)))
 
 .PHONY: help install uninstall lint test
+.PHONY: install-dev
 
 help:
 	@echo "Targets:"
 	@echo "  install    Install CLI to $(TARGET) (and legacy wrapper to $(LEGACY_TARGET))"
+	@echo "  install-dev Symlink CLI + helpers into $(BINDIR) (dev mode: no stale installs)"
 	@echo "  uninstall  Remove installed CLI"
 	@echo "  lint       Run shellcheck on scripts"
 	@echo "  test       Generate a tiny PDF and run an integration smoke test"
@@ -28,6 +30,18 @@ install: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
 	@command -v read-pdf >/dev/null 2>&1 || \
 	  echo "Note: Ensure $(BINDIR) is in your PATH"
 
+install-dev: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
+	@mkdir -p "$(BINDIR)"
+	ln -sf "$(abspath $(SCRIPT))" "$(TARGET)"
+	ln -sf "$(abspath $(LEGACY_SCRIPT))" "$(LEGACY_TARGET)"
+	@for f in $(HELPER_SCRIPTS); do \
+		ln -sf "$$(cd "$$(dirname "$$f")" && pwd)/$$(basename "$$f")" "$(BINDIR)/$$(basename "$$f")"; \
+	done
+	@echo "Symlinked: $(TARGET)"
+	@echo "Symlinked legacy wrapper: $(LEGACY_TARGET)"
+	@echo "Symlinked helpers: $(HELPER_TARGETS)"
+	@echo "Note: this is for development; move/rename the repo and the links will break."
+
 uninstall:
 	@rm -f "$(TARGET)" "$(LEGACY_TARGET)" $(HELPER_TARGETS)
 	@echo "Removed: $(TARGET), $(LEGACY_TARGET), and helper scripts"
@@ -38,6 +52,6 @@ lint:
 test: install
 	@echo "%!\n/Times-Roman findfont 24 scalefont setfont\n72 700 moveto\n(Hello PDF) show\nshowpage" > test.ps
 	@ps2pdf test.ps test.pdf
-	@read-pdf test.pdf --as-images --pages "1"
+	@"$(TARGET)" test.pdf --as-images --pages "1"
 	@test -f tmp/pdf_renders/test/page-001.png
 	@echo "Integration smoke test passed"

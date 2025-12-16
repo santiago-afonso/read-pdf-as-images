@@ -54,6 +54,12 @@ make install
 
 The install target also places the helper Python scripts (`read_pdf_text.py`, `read_pdf_structure.py`) next to the CLI binary so `read-pdf` works from any directory. Re-run `make install` after updating the repo to refresh those helpers.
 
+Development convenience (no stale installs):
+```
+make install-dev
+```
+This creates symlinks into `PREFIX/bin` (default: `~/.local/bin`), so changes in `scripts/` are reflected immediately. If `read-pdf --help` doesn’t match what you see in the repo, check `command -v read-pdf` and re-run `make install` (or use `make install-dev`).
+
 Uninstall:
 ```
 make uninstall
@@ -73,7 +79,7 @@ read-pdf --version | -V
 Defaults:
 - `--format png`
 - `--dpi 220`
-- `--outdir tmp/pdf_renders/<pdf-basename>/`
+- `--outdir tmp/pdf_renders/<pdf-basename-no-ext>/`
 
 Behavior (images mode):
 - Filenames: `page-<NNN>.<ext>` (zero‑padded; width = max(3, digits(total_pages))).

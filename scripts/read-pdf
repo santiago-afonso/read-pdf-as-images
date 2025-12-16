@@ -13,6 +13,15 @@ TOOL_NAME="read-pdf"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
+  local script_target=""
+  local script_target_line=""
+  if command -v readlink >/dev/null 2>&1; then
+    script_target=$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || true)
+    if [ -n "$script_target" ]; then
+      script_target_line=$'  - Script target (symlink): '"$script_target"$'\n'
+    fi
+  fi
+
   cat <<USAGE
 ${TOOL_NAME} — read PDFs as text or images for coding agents
 
@@ -41,8 +50,8 @@ Modes:
   --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
 
 Optional metadata flags (text mode only):
-  --page-structure        Include a simple page-level structure block in <pdf-metadata>.
-  --doc-structure         Include a document-structure block in <pdf-metadata> (currently minimal, best-effort).
+  --page-structure        Include per-page flags/counts in <pdf-metadata> (has_text, word_count, image_count, table_count).
+  --doc-structure         Include doc-level structure in <pdf-metadata> (bookmarks + internal/external link list).
 
 Image options (with --as-images):
   --pages "1,3,7-12"      Comma/range list of 1-based pages. Defaults to all pages.
@@ -57,6 +66,8 @@ Exit codes:
 
 Operational context:
   - Tool: ${TOOL_NAME} ${VERSION}
+  - Script path: ${BASH_SOURCE[0]}
+${script_target_line}  - Note: if you installed via 'make install', re-run it after pulling updates (the install target copies files into PREFIX/bin).
   - Text engines:
     - markitdown[pdf] (fast default) via 'uv run --with markitdown[pdf] python scripts/read_pdf_text.py --engine markitdown'
     - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
