@@ -1,18 +1,40 @@
-# read-pdf-as-images
+# read-pdf
 
-Render selected PDF pages to images and emit a JSONL manifest to stderr.
+Unified CLI to read PDFs either as text (via `pymupdf4llm`) or as images (via Poppler), optimized for use by Codex/CLI coding agents.
 
-Why: Codex/CLI agents need deterministic file paths to attach images. Base64 over stdout is fragile due to output truncation. This tool wraps Poppler utilities to rasterize pages and print a tiny per‑page manifest you can parse immediately.
+Why: Codex/CLI agents need deterministic file paths to attach images *and* a robust way to ingest PDF text while being aware of conversion caveats. This tool wraps Poppler utilities for image rendering and `pymupdf4llm` for text conversion, emitting machine-friendly metadata to help agents reason about the document.
 
 ## Features
-- Pages → images with `pdftoppm` (Poppler)
-- Defaults: PNG @ 220 DPI
-- Output layout: `tmp/pdf_renders/<pdf-basename>/page-<NNN>.png`
-- JSONL per page to stderr: `{"page":7,"path":"…/page-007.png","dpi":220,"format":"png"}`
-- Clean stdout for piping; `--help` and `--version`
+- Text mode (default / `--as-text`):
+  - Uses `pymupdf4llm.to_markdown(...)` (via `uv run --with pymupdf4llm`) to convert the PDF into markdown.
+  - Emits `<pdf-metadata>` with file identity, conversion/tool info, layout-type guesses, and page count.
+  - Emits `<pdf-text>` wrapping the markdown output, with:
+    - a header comment summarizing original page count,
+    - explicit `<!-- PAGE n -->` markers inserted before each page chunk, and
+    - optional `<page-structure>` / `<doc-structure>` blocks when requested.
+- Raw text mode (`--as-raw-text`):
+  - Emits only raw markdown output (no pseudo-XML), using the same `pymupdf4llm`-based converter (still includes `<!-- PAGE n -->` markers).
+- Images mode (`--as-images`):
+  - Pages → images with `pdftoppm` (Poppler).
+  - Defaults: PNG @ 220 DPI.
+  - Output layout: `tmp/pdf_renders/<pdf-basename>/page-<NNN>.png`.
+  - JSONL per page to stderr, now including tool and conversion metadata:
+    `{"page":7,"path":"…/page-007.png","dpi":220,"format":"png","mode":"images","pdf_path":"…","pdf_basename":"…","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}`.
+- Optional structural metadata flags (text mode):
+  - `--page-structure` to include per-page summaries (has_text, word_count, image_count, table_count).
+  - `--doc-structure` to include bookmarks and link lists (internal/external destinations).
+- Clean separation of channels:
+  - Text modes: pseudo-XML goes to stdout; stderr reserved for diagnostics.
+  - Image mode: JSONL goes to stderr; stdout stays empty for easy piping.
 
 ## Install
-Dependencies: Poppler (`pdftoppm`, `pdfinfo`). On Ubuntu/Debian: `sudo apt-get install -y poppler-utils`.
+Dependencies:
+- Poppler (`pdftoppm`, `pdfinfo`) for image rendering and PDF metadata.
+- `uv` for Python execution and dependency management.
+- `pymupdf4llm` (plus PyMuPDF) for PDF → markdown/text conversion (fetched on demand via `uv run --with pymupdf4llm`, no persistent virtualenv required).
+
+On Ubuntu/Debian, for Poppler:
+`sudo apt-get install -y poppler-utils`.
 
 Install the CLI into `~/.local/bin` (override with `PREFIX`):
 
@@ -21,6 +43,8 @@ make install
 # ensure ~/.local/bin is on your PATH
 ```
 
+The install target also places the helper Python scripts (`read_pdf_text.py`, `read_pdf_structure.py`) next to the CLI binary so `read-pdf` works from any directory. Re-run `make install` after updating the repo to refresh those helpers.
+
 Uninstall:
 ```
 make uninstall
@@ -28,9 +52,11 @@ make uninstall
 
 ## Usage
 ```
-read-pdf-as-images <pdf> [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
-read-pdf-as-images --help | -h
-read-pdf-as-images --version | -V
+read-pdf <pdf> [--as-text] [--page-structure] [--doc-structure]
+read-pdf <pdf> --as-raw-text
+read-pdf <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+read-pdf --help | -h
+read-pdf --version | -V
 ```
 
 Defaults:
@@ -38,27 +64,37 @@ Defaults:
 - `--dpi 220`
 - `--outdir tmp/pdf_renders/<pdf-basename>/`
 
-Behavior:
+Behavior (images mode):
 - Filenames: `page-<NNN>.<ext>` (zero‑padded; width = max(3, digits(total_pages))).
 - JSONL is written to stderr, one line per page; stdout stays empty.
 
-Example:
+Example (images):
 ```
-read-pdf-as-images "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --pages "1-3,6-8"
+read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --as-images --pages "1-3,6-8"
 ```
 
 Example JSONL (stderr):
 ```
-{"page":1,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-001.png","dpi":220,"format":"png"}
-{"page":2,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-002.png","dpi":220,"format":"png"}
+{"page":1,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-001.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}
+{"page":2,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-002.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}
 ```
+
+Example (text with metadata):
+```
+read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf"
+```
+This prints:
+- `<pdf-metadata>...</pdf-metadata>` with file identity, conversion/tool info, and layout-type guesses.
+- `<pdf-text>...</pdf-text>` wrapping the `pymupdf4llm` markdown output, including a header comment about original page count and `<!-- PAGE n -->` markers.
+- Optional `<page-structure>` and `<doc-structure>` blocks when `--page-structure` / `--doc-structure` are supplied, including per-page stats plus bookmarks/links.
 
 ## Exit Codes
 - `0`: success
 - `2`: usage error (prints `--help`)
-- `3+`: runtime errors (dependencies, missing outputs, etc.)
+- `3+`: runtime errors (dependencies, missing outputs, conversions, etc.)
 
 ## Notes
-- This tool generates images only; it does not perform OCR or text extraction.
+- `read-pdf-as-images` remains as a thin, deprecated wrapper that delegates to `read-pdf --as-images` for backward compatibility.
+- Image mode generates images only; it does not perform OCR or text extraction.
 - Page range parsing accepts lists and ranges, e.g., `1,3,7-12`.
-
+- Text modes rely on `pymupdf4llm`; `read-pdf` uses `uv run --with pymupdf4llm` under the hood, so you only need `uv` installed and network access the first time to fetch the package (subsequent runs will use the cached environment).

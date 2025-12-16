@@ -1,10 +1,10 @@
-Minimal usage prompt for read-pdf-as-images
+Minimal usage prompt for read-pdf (images mode)
 
 - Task: visually inspect specific PDF pages (no OCR/text extraction).
 - Command to run:
-  scripts/read-pdf-as-images "<pdf_path>" --pages "<comma/ranges>"
+  scripts/read-pdf "<pdf_path>" --as-images --pages "<comma/ranges>"
 - Defaults: PNG, 220 DPI. Output files under tmp/pdf_renders/<pdf-name>/page-###.png
-- The command writes JSONL to stderr with {"page", "path", ...}; attach each image by the emitted path.
+- The command writes JSONL to stderr with {"page", "path", "dpi", "format", "mode", "pdf_path", "pdf_basename", "tool", "tool_version", "engine"}; attach each image by the emitted path.
 
 Example
-  scripts/read-pdf-as-images "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --pages "1-3,6-8"
+  scripts/read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --as-images --pages "1-3,6-8"

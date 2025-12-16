@@ -1,0 +1,671 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# read-pdf
+# Unified CLI to:
+# - Read PDFs as markdown text via pymupdf4llm, wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
+# - Emit raw markdown output only (--as-raw-text).
+# - Render pages to images (--as-images) and emit a JSONL manifest to stderr.
+
+VERSION="0.1.0"
+TOOL_NAME="read-pdf"
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+usage() {
+  cat <<USAGE
+${TOOL_NAME} — read PDFs as text or images for coding agents
+
+Usage:
+  ${TOOL_NAME} <pdf> [--as-text] [--page-structure] [--doc-structure]
+  ${TOOL_NAME} <pdf> --as-raw-text
+  ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+  ${TOOL_NAME} --help | -h
+  ${TOOL_NAME} --version | -V
+
+Modes:
+  (default) / --as-text   Convert the PDF with pymupdf4llm and emit:
+                          - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
+                          - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
+  --as-raw-text           Emit only the raw markdown output (no pseudo-XML).
+  --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
+
+Optional metadata flags (text mode only):
+  --page-structure        Include a simple page-level structure block in <pdf-metadata>.
+  --doc-structure         Include a document-structure block in <pdf-metadata> (currently minimal, best-effort).
+
+Image options (with --as-images):
+  --pages "1,3,7-12"      Comma/range list of 1-based pages. Defaults to all pages.
+  --dpi 220               Rendering DPI (passed to pdftoppm). Default: 220.
+  --format png|jpeg       Output image format. Default: png.
+  --outdir DIR            Output directory. Default: tmp/pdf_renders/<pdf-basename-no-ext>/
+
+Exit codes:
+  0  success
+  2  usage error (prints this help)
+  3+ runtime errors (dependencies, IO, conversions)
+
+Operational context:
+  - Tool: ${TOOL_NAME} ${VERSION}
+  - Text engine: pymupdf4llm (invoked via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py')
+  - Image engine: pdfinfo + pdftoppm (Poppler)
+  - JSONL: in --as-images mode, one line per page is written to stderr. Text modes keep stderr for diagnostics only.
+USAGE
+}
+
+err() { echo "ERROR: $*" >&2; }
+
+need_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    runtime_err "Missing dependency: $1"
+  fi
+}
+
+runtime_err() {
+  local msg=$1
+  {
+    echo "ERROR: ${msg}"
+    echo "Context: tool=${TOOL_NAME} version=${VERSION} mode=${MODE:-unknown} pdf=${PDF:-<none>} engine=${CONVERSION_ENGINE:-<unknown>}"
+    echo "Hint: run '${TOOL_NAME} --help' for usage and context."
+  } >&2
+  exit 3
+}
+
+xml_escape() {
+  local s=${1-}
+  s=${s//&/&amp;}
+  s=${s//</&lt;}
+  s=${s//>/&gt;}
+  s=${s//\"/&quot;}
+  s=${s//\'/&apos;}
+  printf '%s' "$s"
+}
+
+json_escape() {
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+ensure_helper() {
+  local path=$1
+  local label=${2:-$1}
+  if [ ! -f "$path" ]; then
+    runtime_err "Missing helper script: ${label} (expected at ${path}). Reinstall via 'make install' to place helper scripts alongside the CLI."
+  fi
+}
+
+# Globals for parsed PDF info (text and images modes)
+PDF=""
+PDF_PATH=""
+PDF_BASENAME=""
+PDF_PAGES=0
+PDF_TITLE=""
+PDF_AUTHOR=""
+PDF_PRODUCER=""
+PDF_CREATOR=""
+PDF_VERSION=""
+PDF_SIZE_BYTES=0
+PDF_SIZE_KB=0
+
+MODE="text"        # text | raw | images
+PAGE_STRUCTURE=false
+DOC_STRUCTURE=false
+
+# Image mode options
+PAGES_SPEC=""
+DPI=220
+FORMAT="png"
+OUTDIR=""
+
+CONVERSION_ENGINE=""
+PAGE_STRUCTURE_XML=""
+DOC_STRUCTURE_XML=""
+
+READ_PDF_TEXT_SCRIPT="${SCRIPT_DIR}/read_pdf_text.py"
+READ_PDF_STRUCTURE_SCRIPT="${SCRIPT_DIR}/read_pdf_structure.py"
+
+gather_pdf_info() {
+  local pdf=$1
+  PDF="$pdf"
+
+  # Absolute-ish path without needing realpath
+  local dir base
+  dir=$(cd "$(dirname "$pdf")" && pwd)
+  base=$(basename -- "$pdf")
+  PDF_PATH="${dir}/${base}"
+  PDF_BASENAME="$base"
+
+  need_cmd pdfinfo
+  local info
+  if ! info=$(pdfinfo "$pdf" 2>/dev/null); then
+    runtime_err "pdfinfo failed for: $pdf"
+  fi
+
+  PDF_PAGES=$(printf '%s\n' "$info" | sed -n 's/^Pages:[[:space:]]*//p' | head -n1)
+  PDF_TITLE=$(printf '%s\n' "$info" | sed -n 's/^Title:[[:space:]]*//p' | head -n1)
+  PDF_AUTHOR=$(printf '%s\n' "$info" | sed -n 's/^Author:[[:space:]]*//p' | head -n1)
+  PDF_PRODUCER=$(printf '%s\n' "$info" | sed -n 's/^Producer:[[:space:]]*//p' | head -n1)
+  PDF_CREATOR=$(printf '%s\n' "$info" | sed -n 's/^Creator:[[:space:]]*//p' | head -n1)
+  PDF_VERSION=$(printf '%s\n' "$info" | sed -n 's/^PDF version:[[:space:]]*//p' | head -n1)
+
+  if ! [[ "$PDF_PAGES" =~ ^[0-9]+$ ]]; then
+    runtime_err "Could not determine page count for: $pdf"
+  fi
+
+  local bytes
+  bytes=$(wc -c < "$pdf" | tr -d ' ')
+  PDF_SIZE_BYTES=${bytes:-0}
+  if [[ "$PDF_SIZE_BYTES" =~ ^[0-9]+$ ]]; then
+    PDF_SIZE_KB=$(( (PDF_SIZE_BYTES + 1023) / 1024 ))
+  else
+    PDF_SIZE_BYTES=0
+    PDF_SIZE_KB=0
+  fi
+}
+
+compute_layout_guesses() {
+  local char_count=$1
+
+  LAYOUT_GUESS_SLIDE_DECK="false"
+  LAYOUT_GUESS_SCANNED="false"
+  LAYOUT_GUESS_MULTI_COLUMN="false"
+
+  # Simple heuristics, explicitly labeled as guesses.
+  if [[ "$PDF_CREATOR" =~ [Pp]ower[Pp]oint ]] || [[ "$PDF_PRODUCER" =~ [Pp]ower[Pp]oint ]] || [[ "$PDF_BASENAME" =~ [Ss]lides ]] || [[ "$PDF_BASENAME" =~ [Dd]eck ]]; then
+    LAYOUT_GUESS_SLIDE_DECK="true"
+  fi
+
+  if (( PDF_PAGES > 0 )); then
+    local per_page=$(( char_count / PDF_PAGES ))
+    # Very low text density per page suggests a scanned document.
+    if (( per_page < 50 )); then
+      LAYOUT_GUESS_SCANNED="true"
+    fi
+    # High density could suggest multi-column content; very rough guess.
+    if (( per_page > 1200 )); then
+      LAYOUT_GUESS_MULTI_COLUMN="true"
+    fi
+  fi
+}
+
+emit_metadata() {
+  local char_count=$1
+
+  echo "<pdf-metadata>"
+  printf '  <file path="%s" basename="%s" size_bytes="%s" size_kb="%s" />\n' \
+    "$(xml_escape "$PDF_PATH")" \
+    "$(xml_escape "$PDF_BASENAME")" \
+    "$(xml_escape "$PDF_SIZE_BYTES")" \
+    "$(xml_escape "$PDF_SIZE_KB")"
+
+  printf '  <document title="%s" author="%s" pages="%s" pdf_version="%s" producer="%s" creator="%s" />\n' \
+    "$(xml_escape "$PDF_TITLE")" \
+    "$(xml_escape "$PDF_AUTHOR")" \
+    "$(xml_escape "$PDF_PAGES")" \
+    "$(xml_escape "$PDF_VERSION")" \
+    "$(xml_escape "$PDF_PRODUCER")" \
+    "$(xml_escape "$PDF_CREATOR")"
+
+  printf '  <conversion tool="%s" tool_version="%s" mode="%s" engine="%s" engine_version="%s" />\n' \
+    "$(xml_escape "$TOOL_NAME")" \
+    "$(xml_escape "$VERSION")" \
+    "$(xml_escape "$MODE")" \
+    "$(xml_escape "$CONVERSION_ENGINE")" \
+    "unknown"
+
+  compute_layout_guesses "$char_count"
+  printf '  <layout-guesses likely_slide_deck="%s" likely_scanned_document="%s" likely_multi_column="%s" note="%s" />\n' \
+    "$(xml_escape "$LAYOUT_GUESS_SLIDE_DECK")" \
+    "$(xml_escape "$LAYOUT_GUESS_SCANNED")" \
+    "$(xml_escape "$LAYOUT_GUESS_MULTI_COLUMN")" \
+    "heuristic-only; may be inaccurate"
+
+  if [ "$PAGE_STRUCTURE" = true ]; then
+    if [ -n "$PAGE_STRUCTURE_XML" ]; then
+      echo "$PAGE_STRUCTURE_XML"
+    else
+      echo "  <page-structure>"
+      local i
+      for (( i=1; i<=PDF_PAGES; i++ )); do
+        printf '    <page index="%d" />\n' "$i"
+      done
+      echo "  </page-structure>"
+    fi
+  fi
+
+  if [ "$DOC_STRUCTURE" = true ]; then
+    if [ -n "$DOC_STRUCTURE_XML" ]; then
+      echo "$DOC_STRUCTURE_XML"
+    else
+      printf '  <doc-structure available="false" reason="not-implemented" />\n'
+    fi
+  fi
+
+  echo "</pdf-metadata>"
+}
+
+emit_text_block() {
+  local tmp_text=$1
+  local char_count=$2
+
+  printf '<pdf-text format="%s" source="%s" lossy="%s" pages="%s" char_count="%s">\n' \
+    "markdown" \
+    "pymupdf4llm" \
+    "true" \
+    "$(xml_escape "$PDF_PAGES")" \
+    "$(xml_escape "$char_count")"
+  printf '<![CDATA[\n'
+  printf '<!-- ORIGINAL_PAGES=%s; page boundaries are marked with \"<!-- PAGE n -->\" comments inserted by read_pdf_text.py. -->\n' \
+    "$PDF_PAGES"
+  cat "$tmp_text"
+  printf '\n]]>\n'
+  printf '</pdf-text>\n'
+}
+
+text_mode() {
+  CONVERSION_ENGINE="pymupdf4llm"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  gather_pdf_info "$PDF"
+
+  need_cmd uv
+
+  # Optional structural enrichment
+  if [ "$PAGE_STRUCTURE" = true ] || [ "$DOC_STRUCTURE" = true ]; then
+    ensure_helper "$READ_PDF_STRUCTURE_SCRIPT" "read_pdf_structure.py"
+    local struct_json
+    if ! struct_json=$(uv run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
+      runtime_err "pymupdf4llm structure scan failed for: $PDF"
+    fi
+
+    if [ "$PAGE_STRUCTURE" = true ]; then
+      PAGE_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+import json
+import sys
+
+def esc(val: str) -> str:
+    return (
+        val.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+data = json.loads(sys.argv[1])
+out = []
+out.append("  <page-structure>")
+for p in data.get("pages", []):
+    idx = p.get("index")
+    if idx is None:
+        continue
+    out.append(
+        f'    <page index="{idx}" '
+        f'has_text="{str(bool(p.get("has_text"))).lower()}" '
+        f'word_count="{p.get("word_count", 0)}" '
+        f'image_count="{p.get("image_count", 0)}" '
+        f'table_count="{p.get("table_count", 0)}" />'
+    )
+out.append("  </page-structure>")
+print("\n".join(out))
+PY
+)
+    fi
+
+    if [ "$DOC_STRUCTURE" = true ]; then
+      DOC_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+import json
+import sys
+
+def esc(val: str) -> str:
+    return (
+        val.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+data = json.loads(sys.argv[1])
+out = []
+out.append("  <doc-structure>")
+
+out.append("    <bookmarks>")
+for b in data.get("bookmarks", []):
+    title = esc(str(b.get("title", "")))
+    page = b.get("page")
+    level = b.get("level")
+    if page is None or level is None:
+        continue
+    out.append(f'      <bookmark title="{title}" page="{page}" level="{level}" />')
+out.append("    </bookmarks>")
+
+out.append("    <links>")
+for l in data.get("links", []):
+    ltype = l.get("type")
+    from_page = l.get("from_page")
+    if from_page is None or ltype not in {"internal", "external"}:
+        continue
+    if ltype == "external":
+        uri = esc(str(l.get("uri", "")))
+        out.append(f'      <link type="external" from_page="{from_page}" uri="{uri}" />')
+    elif ltype == "internal":
+        to_page = l.get("to_page")
+        if to_page is None:
+            continue
+        out.append(f'      <link type="internal" from_page="{from_page}" to_page="{to_page}" />')
+out.append("    </links>")
+
+out.append("  </doc-structure>")
+print("\n".join(out))
+PY
+      )
+    fi
+  fi
+
+  ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
+
+  local tmpdir
+  tmpdir=$(mktemp -d -t read-pdf-text.XXXXXX)
+  local tmp_text="${tmpdir}/text.md"
+
+  if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF" >"$tmp_text"; then
+    runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+  fi
+
+  local char_count
+  char_count=$(wc -c < "$tmp_text" | tr -d ' ')
+  emit_metadata "$char_count"
+  emit_text_block "$tmp_text" "$char_count"
+  rm -rf "$tmpdir"
+}
+
+raw_text_mode() {
+  CONVERSION_ENGINE="pymupdf4llm"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd uv
+  ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
+
+  if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF"; then
+    runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+  fi
+}
+
+# ---------- Images mode helpers (ported from read-pdf-as-images) ----------
+
+parse_pages() {
+  local spec=$1
+  local IFS=,
+  local -a parts out
+  read -r -a parts <<<"$spec"
+  local part
+  for part in "${parts[@]}"; do
+    part=${part//[[:space:]]/}
+    [ -z "$part" ] && continue
+    if [[ "$part" =~ ^[0-9]+$ ]]; then
+      out+=("$part")
+    elif [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+      if (( a<=b )); then
+        local i
+        for (( i=a; i<=b; i++ )); do out+=("$i"); done
+      else
+        err "Invalid range: $part (start>end)"
+        usage >&2
+        exit 2
+      fi
+    else
+      err "Invalid page token: $part"
+      usage >&2
+      exit 2
+    fi
+  done
+  printf '%s\n' "${out[@]}" | awk 'NF' | sort -n | uniq
+}
+
+group_contiguous() {
+  awk 'BEGIN{prev=-1;start=-1}
+       {cur=$1; if (start==-1){start=cur; prev=cur; next}
+        if (cur==prev+1){prev=cur; next}
+        printf "%d %d\n", start, prev; start=cur; prev=cur}
+       END{ if (start!=-1) printf "%d %d\n", start, prev }'
+}
+
+images_mode() {
+  CONVERSION_ENGINE="pdftoppm"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd pdfinfo
+  need_cmd pdftoppm
+
+  gather_pdf_info "$PDF"
+
+  # Validate format
+  case "$FORMAT" in
+    png|jpeg) :;;
+    *)
+      err "Unsupported --format: $FORMAT (png|jpeg)"
+      usage >&2
+      exit 2
+      ;;
+  esac
+
+  if [ -z "$OUTDIR" ]; then
+    local base_no_ext
+    base_no_ext=${PDF_BASENAME%.*}
+    OUTDIR="tmp/pdf_renders/$base_no_ext"
+  fi
+  mkdir -p -- "$OUTDIR"
+
+  local -a pages=()
+  if [ -n "$PAGES_SPEC" ]; then
+    mapfile -t pages < <(parse_pages "$PAGES_SPEC")
+  else
+    local i
+    for (( i=1; i<=PDF_PAGES; i++ )); do pages+=("$i"); done
+  fi
+
+  if ((${#pages[@]}==0)); then
+    err "No pages selected"
+    usage >&2
+    exit 2
+  fi
+
+  local p
+  for p in "${pages[@]}"; do
+    if (( p<1 || p>PDF_PAGES )); then
+      err "Page out of bounds: $p (1..$PDF_PAGES)"
+      usage >&2
+      exit 2
+    fi
+  done
+
+  local pad
+  local digits=${#PDF_PAGES}
+  if (( digits<3 )); then pad=3; else pad=$digits; fi
+
+  local fmtflag
+  fmtflag="-$FORMAT"
+
+  local -a grouped=()
+  mapfile -t grouped < <(printf '%s\n' "${pages[@]}" | group_contiguous)
+  local range
+  for range in "${grouped[@]}"; do
+    local start end
+    read -r start end <<<"$range"
+    pdftoppm "$fmtflag" -rx "$DPI" -ry "$DPI" -f "$start" -l "$end" -- "$PDF" "$OUTDIR/page" >/dev/null
+  done
+
+  for p in "${pages[@]}"; do
+    local fname
+    printf -v fname "%s/page-%0${pad}d.%s" "$OUTDIR" "$p" "$FORMAT"
+    if [ ! -f "$fname" ]; then
+      local found=""
+      local -a candidates=()
+      printf -v candidates[0] "%s/page-%d.%s" "$OUTDIR" "$p" "$FORMAT"
+      printf -v candidates[1] "%s/page-%02d.%s" "$OUTDIR" "$p" "$FORMAT"
+      printf -v candidates[2] "%s/page-%03d.%s" "$OUTDIR" "$p" "$FORMAT"
+      local candidate
+      for candidate in "${candidates[@]}"; do
+        if [ -f "$candidate" ]; then
+          found="$candidate"
+          break
+        fi
+      done
+      if [ -n "$found" ]; then
+        mv -f -- "$found" "$fname"
+      else
+        runtime_err "Expected output missing: $fname"
+      fi
+    fi
+    printf '{"page":%d,"path":"%s","dpi":%d,"format":"%s","mode":"images","pdf_path":"%s","pdf_basename":"%s","tool":"%s","tool_version":"%s","engine":"%s"}\n' \
+      "$p" \
+      "$(json_escape "$fname")" \
+      "$DPI" \
+      "$FORMAT" \
+      "$(json_escape "$PDF_PATH")" \
+      "$(json_escape "$PDF_BASENAME")" \
+      "$(json_escape "$TOOL_NAME")" \
+      "$(json_escape "$VERSION")" \
+      "$(json_escape "$CONVERSION_ENGINE")" >&2
+  done
+}
+
+parse_args() {
+  if (( $#==0 )); then
+    usage >&2
+    exit 2
+  fi
+
+  while (( $#>0 )); do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -V|--version)
+        echo "${TOOL_NAME} ${VERSION}"
+        exit 0
+        ;;
+      --as-text)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="text"
+        shift
+        ;;
+      --as-raw-text)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="raw"
+        shift
+        ;;
+      --as-images)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="images"
+        shift
+        ;;
+      --page-structure)
+        PAGE_STRUCTURE=true
+        shift
+        ;;
+      --doc-structure)
+        DOC_STRUCTURE=true
+        shift
+        ;;
+      --pages)
+        if [ "$MODE" != "images" ]; then
+          err "--pages is only valid with --as-images"
+          usage >&2
+          exit 2
+        fi
+        shift || { usage >&2; exit 2; }
+        PAGES_SPEC=${1:-}
+        shift
+        ;;
+      --dpi)
+        if [ "$MODE" != "images" ]; then
+          err "--dpi is only valid with --as-images"
+          usage >&2
+          exit 2
+        fi
+        shift || { usage >&2; exit 2; }
+        DPI=${1:-}
+        shift
+        ;;
+      --format)
+        if [ "$MODE" != "images" ]; then
+          err "--format is only valid with --as-images"
+          usage >&2
+          exit 2
+        fi
+        shift || { usage >&2; exit 2; }
+        FORMAT=${1:-}
+        shift
+        ;;
+      --outdir)
+        if [ "$MODE" != "images" ]; then
+          err "--outdir is only valid with --as-images"
+          usage >&2
+          exit 2
+        fi
+        shift || { usage >&2; exit 2; }
+        OUTDIR=${1:-}
+        shift
+        ;;
+      --*)
+        err "Unknown flag: $1"
+        usage >&2
+        exit 2
+        ;;
+      *)
+        if [ -z "$PDF" ]; then
+          PDF=$1
+        else
+          err "Unexpected extra argument: $1"
+          usage >&2
+          exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "${PDF:-}" ]; then
+    err "Missing <pdf> argument"
+    usage >&2
+    exit 2
+  fi
+}
+
+main() {
+  parse_args "$@"
+  case "$MODE" in
+    text) text_mode ;;
+    raw) raw_text_mode ;;
+    images) images_mode ;;
+    *)
+      runtime_err "Unknown mode: $MODE"
+      ;;
+  esac
+}
+
+main "$@"
