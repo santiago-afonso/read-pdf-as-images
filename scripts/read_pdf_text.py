@@ -323,38 +323,24 @@ def _select_toc_pages(page_text_by_number: dict[int, str], toc_max_pages: int) -
 def build_markdown_with_page_markers(
     pdf_path: Path,
     *,
+    engine: str = "markitdown",
     filter_mode: str = "all",
     toc_max_pages: int = 5,
+    expected_pages: int | None = None,
 ) -> tuple[str, dict[str, object]]:
     """Return markdown for the PDF, segmented per page with explicit markers.
 
-    We use pymupdf4llm.to_markdown(..., page_chunks=True) to get per-page chunks
-    and then prepend a clear comment marker before each page's text:
+    We extract per-page markdown/text, then prepend a clear comment marker before
+    each page's text:
       <!-- PAGE 1 -->
       <page 1 markdown>
       <!-- PAGE 2 -->
       <page 2 markdown>
       ...
     """
-    # Some versions of pymupdf4llm print informational messages to stdout.
-    # Capture and discard any such output so that this script's stdout only
-    # contains the markdown we generate.
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        # Import inside the redirected context so that any informational prints
-        # from pymupdf4llm or its dependencies are captured and discarded.
-        import pymupdf4llm  # type: ignore[import-not-found]
-
-        chunks = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True, extract_words=True)
-
-    page_text_by_number: dict[int, str] = {}
-    for chunk in chunks:
-        metadata = chunk.get("metadata") or {}
-        page_no = metadata.get("page")
-        if page_no is None:
-            continue
-        text = chunk.get("text") or ""
-        page_text_by_number[int(page_no)] = text
+    page_text_by_number: dict[int, str] = _extract_pages(
+        pdf_path, engine=engine, expected_pages=expected_pages
+    )
 
     selected_pages: list[int] | None = None
     if filter_mode == "toc":
@@ -370,6 +356,7 @@ def build_markdown_with_page_markers(
     markdown = "".join(parts)
 
     meta: dict[str, object] = {
+        "engine": engine,
         "filter": filter_mode,
         "toc_max_pages": toc_max_pages,
         "full_char_count": sum(len(t) for t in page_text_by_number.values()),
@@ -379,12 +366,88 @@ def build_markdown_with_page_markers(
     return markdown, meta
 
 
+def _extract_pages(
+    pdf_path: Path,
+    *,
+    engine: str,
+    expected_pages: int | None,
+) -> dict[int, str]:
+    if engine == "pymupdf4llm":
+        page_text_by_number = _extract_pages_pymupdf4llm(pdf_path)
+    elif engine == "markitdown":
+        page_text_by_number = _extract_pages_markitdown(pdf_path)
+    else:
+        raise ValueError(f"Unknown engine: {engine}")
+
+    # Ensure predictable keys for downstream TOC heuristics (max_page checks)
+    # and for wrapper metadata that uses pdfinfo page counts.
+    if expected_pages is not None and expected_pages > 0:
+        normalized: dict[int, str] = {}
+        for i in range(1, expected_pages + 1):
+            normalized[i] = page_text_by_number.get(i, "")
+        return normalized
+
+    return dict(sorted(page_text_by_number.items()))
+
+
+def _extract_pages_pymupdf4llm(pdf_path: Path) -> dict[int, str]:
+    # Some versions of pymupdf4llm print informational messages to stdout.
+    # Capture and discard any such output so that this script's stdout only
+    # contains the markdown we generate.
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        import pymupdf4llm  # type: ignore[import-not-found]
+
+        chunks = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True, extract_words=True)
+
+    page_text_by_number: dict[int, str] = {}
+    for chunk in chunks:
+        metadata = chunk.get("metadata") or {}
+        page_no = metadata.get("page")
+        if page_no is None:
+            continue
+        text = chunk.get("text") or ""
+        page_text_by_number[int(page_no)] = text
+    return page_text_by_number
+
+
+def _extract_pages_markitdown(pdf_path: Path) -> dict[int, str]:
+    # Like pymupdf4llm, some converters can print diagnostics to stdout.
+    # Prevent that from polluting our own stdout (we only emit the final markdown).
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        from markitdown import MarkItDown  # type: ignore[import-not-found]
+
+        result = MarkItDown().convert_local(pdf_path)
+        # DocumentConverterResult exposes both .markdown and .text_content; for PDFs
+        # these are typically identical, but prefer .markdown when available.
+        text = getattr(result, "markdown", None) or result.text_content
+
+    # markitdown's pdf path emits form-feed (\\f) separators between pages.
+    # Keep empty pages (split preserves them) so page indices stay aligned.
+    pages = text.split("\f")
+    page_text_by_number: dict[int, str] = {}
+    for idx, page_text in enumerate(pages, start=1):
+        # Normalize to match the pymupdf4llm path (a trailing newline is added later).
+        page_text_by_number[idx] = page_text.rstrip() + "\n" if page_text.strip() else ""
+    return page_text_by_number
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert a PDF into markdown using pymupdf4llm, "
-            "inserting explicit <!-- PAGE n --> markers."
+            "Convert a PDF into markdown, inserting explicit <!-- PAGE n --> markers."
         )
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["markitdown", "pymupdf4llm"],
+        default="markitdown",
+        help=(
+            "Extraction engine. "
+            "'markitdown' is faster but less layout-aware; "
+            "'pymupdf4llm' is more layout-aware but can be slow on some PDFs."
+        ),
     )
     parser.add_argument(
         "--filter",
@@ -405,6 +468,12 @@ def main(argv: list[str] | None = None) -> int:
         "--meta-json-out",
         help="Optional path to write extraction metadata JSON (for wrapper/automation).",
     )
+    parser.add_argument(
+        "--expected-pages",
+        type=int,
+        default=None,
+        help="Optional expected page count (e.g., from pdfinfo) to align page indices. Default: unset.",
+    )
     parser.add_argument("pdf", help="Path to the PDF file to convert.")
     args = parser.parse_args(argv)
 
@@ -415,8 +484,10 @@ def main(argv: list[str] | None = None) -> int:
 
     markdown, meta = build_markdown_with_page_markers(
         pdf_path,
+        engine=args.engine,
         filter_mode=args.filter,
         toc_max_pages=args.toc_max_pages,
+        expected_pages=args.expected_pages,
     )
     if args.meta_json_out:
         Path(args.meta_json_out).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")

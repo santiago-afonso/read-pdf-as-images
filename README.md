@@ -1,17 +1,20 @@
 # read-pdf
 
-Unified CLI to read PDFs either as text (via `pymupdf4llm`) or as images (via Poppler), optimized for use by Codex/CLI coding agents.
+Unified CLI to read PDFs either as text (default: `markitdown[pdf]`, optional: `pymupdf4llm`) or as images (via Poppler), optimized for use by Codex/CLI coding agents.
 
-Why: Codex/CLI agents need deterministic file paths to attach images *and* a robust way to ingest PDF text while being aware of conversion caveats. This tool wraps Poppler utilities for image rendering and `pymupdf4llm` for text conversion, emitting machine-friendly metadata to help agents reason about the document.
+Why: Codex/CLI agents need deterministic file paths to attach images *and* a robust way to ingest PDF text while being aware of conversion caveats. This tool wraps Poppler utilities for image rendering and provides two text conversion engines (fast default + precise fallback), emitting machine-friendly metadata to help agents reason about the document.
 
 ## Features
-- Text mode (default / `--as-text`):
-  - Uses `pymupdf4llm.to_markdown(...)` (via `uv run --with pymupdf4llm`) to convert the PDF into markdown.
+- Text mode (default / `--as-text-fast`, alias: `--as-text`):
+  - Uses `markitdown[pdf]` (via `uv run --with markitdown[pdf]`) to convert the PDF into markdown.
   - Emits `<pdf-metadata>` with file identity, conversion/tool info, layout-type guesses, and page count.
   - Emits `<pdf-text>` wrapping the markdown output, with:
     - a header comment summarizing original page count,
     - explicit `<!-- PAGE n -->` markers inserted before each page chunk, and
     - optional `<page-structure>` / `<doc-structure>` blocks when requested.
+- Precise (slow) text mode (`--as-text-precise-layout-slow`):
+  - Uses `pymupdf4llm.to_markdown(...)` (via `uv run --with pymupdf4llm`) to convert the PDF into markdown.
+  - Can be significantly slower than markitdown on some PDFs; use when layout-aware extraction is worth the cost.
 - TOC/index extraction (`--toc`, best-effort):
   - Emits the same pseudo-XML wrapper as text mode (`<pdf-metadata>` + `<pdf-text>`), but with `<pdf-text>` containing only pages that look like a Table of Contents / Índice / Index / List of Figures / etc.
   - Uses regex + simple structural heuristics (e.g., headings plus lines ending with page numbers / dot leaders). This can miss real TOC pages.
@@ -36,7 +39,8 @@ Why: Codex/CLI agents need deterministic file paths to attach images *and* a rob
 Dependencies:
 - Poppler (`pdftoppm`, `pdfinfo`) for image rendering and PDF metadata.
 - `uv` for Python execution and dependency management.
-- `pymupdf4llm` (plus PyMuPDF) for PDF → markdown/text conversion (fetched on demand via `uv run --with pymupdf4llm`, no persistent virtualenv required).
+- `markitdown[pdf]` for fast PDF → markdown/text conversion (fetched on demand via `uv run --with markitdown[pdf]`, no persistent virtualenv required).
+- `pymupdf4llm` (plus PyMuPDF) for the precise (slow) text mode and optional structural scans (fetched on demand via `uv run --with pymupdf4llm`).
 
 On Ubuntu/Debian, for Poppler:
 `sudo apt-get install -y poppler-utils`.
@@ -57,7 +61,8 @@ make uninstall
 
 ## Usage
 ```
-read-pdf <pdf> [--as-text] [--page-structure] [--doc-structure]
+read-pdf <pdf> [--as-text-fast] [--page-structure] [--doc-structure]
+read-pdf <pdf> --as-text-precise-layout-slow [--page-structure] [--doc-structure]
 read-pdf <pdf> --toc [--page-structure] [--doc-structure]
 read-pdf <pdf> --as-raw-text
 read-pdf <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
@@ -91,7 +96,7 @@ read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf"
 ```
 This prints:
 - `<pdf-metadata>...</pdf-metadata>` with file identity, conversion/tool info, and layout-type guesses.
-- `<pdf-text>...</pdf-text>` wrapping the `pymupdf4llm` markdown output, including a header comment about original page count and `<!-- PAGE n -->` markers.
+- `<pdf-text>...</pdf-text>` wrapping the markdown output, including a header comment about original page count and `<!-- PAGE n -->` markers.
 - Optional `<page-structure>` and `<doc-structure>` blocks when `--page-structure` / `--doc-structure` are supplied, including per-page stats plus bookmarks/links.
 
 ## Exit Codes
@@ -103,4 +108,5 @@ This prints:
 - `read-pdf-as-images` remains as a thin, deprecated wrapper that delegates to `read-pdf --as-images` for backward compatibility.
 - Image mode generates images only; it does not perform OCR or text extraction.
 - Page range parsing accepts lists and ranges, e.g., `1,3,7-12`.
-- Text modes rely on `pymupdf4llm`; `read-pdf` uses `uv run --with pymupdf4llm` under the hood, so you only need `uv` installed and network access the first time to fetch the package (subsequent runs will use the cached environment).
+- Default text mode relies on `markitdown[pdf]`; `read-pdf` uses `uv run --with markitdown[pdf]` under the hood, so you only need `uv` installed and network access the first time to fetch the package (subsequent runs will use the cached environment).
+- Precise (slow) text mode relies on `pymupdf4llm`; use `--as-text-precise-layout-slow` when you need layout-aware extraction and can tolerate higher runtime.

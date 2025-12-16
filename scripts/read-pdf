@@ -3,7 +3,7 @@ set -euo pipefail
 
 # read-pdf
 # Unified CLI to:
-# - Read PDFs as markdown text via pymupdf4llm, wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
+# - Read PDFs as markdown text via markitdown (fast default) or pymupdf4llm (precise, slow), wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
 # - Emit raw markdown output only (--as-raw-text).
 # - Render pages to images (--as-images) and emit a JSONL manifest to stderr.
 
@@ -17,7 +17,8 @@ usage() {
 ${TOOL_NAME} — read PDFs as text or images for coding agents
 
 Usage:
-  ${TOOL_NAME} <pdf> [--as-text] [--page-structure] [--doc-structure]
+  ${TOOL_NAME} <pdf> [--as-text-fast] [--page-structure] [--doc-structure]
+  ${TOOL_NAME} <pdf> --as-text-precise-layout-slow [--page-structure] [--doc-structure]
   ${TOOL_NAME} <pdf> --toc [--page-structure] [--doc-structure]
   ${TOOL_NAME} <pdf> --as-raw-text
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
@@ -25,9 +26,13 @@ Usage:
   ${TOOL_NAME} --version | -V
 
 Modes:
-  (default) / --as-text   Convert the PDF with pymupdf4llm and emit:
-                          - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
-                          - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
+  (default) / --as-text-fast  Convert the PDF with markitdown (fast) and emit:
+                              - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
+                              - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
+                              Alias: --as-text
+  --as-text-precise-layout-slow  Convert the PDF with pymupdf4llm (layout-aware, can be very slow) and emit:
+                                 - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
+                                 - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
   --toc                   Best-effort extraction of TOC/Index/List pages (English+Spanish) with heuristics
                           (e.g., headings + lines ending in page numbers). Emits the same pseudo-XML wrapper
                           as text mode but caps output to 5 pages. If no matches are found, prints plain
@@ -52,7 +57,9 @@ Exit codes:
 
 Operational context:
   - Tool: ${TOOL_NAME} ${VERSION}
-  - Text engine: pymupdf4llm (invoked via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py')
+  - Text engines:
+    - markitdown[pdf] (fast default) via 'uv run --with markitdown[pdf] python scripts/read_pdf_text.py --engine markitdown'
+    - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
   - Image engine: pdfinfo + pdftoppm (Poppler)
   - JSONL: in --as-images mode, one line per page is written to stderr. Text modes keep stderr for diagnostics only.
 USAGE
@@ -118,6 +125,7 @@ PDF_SIZE_BYTES=0
 PDF_SIZE_KB=0
 
 MODE="text"        # text | raw | images
+TEXT_ENGINE="markitdown"  # markitdown | pymupdf4llm (text mode only)
 PAGE_STRUCTURE=false
 DOC_STRUCTURE=false
 TOC_MAX_PAGES=5
@@ -283,7 +291,7 @@ emit_text_block() {
 
   printf '<pdf-text format="%s" source="%s" lossy="%s" pages="%s" char_count="%s"%s>\n' \
     "markdown" \
-    "pymupdf4llm" \
+    "$(xml_escape "$CONVERSION_ENGINE")" \
     "true" \
     "$(xml_escape "$PDF_PAGES")" \
     "$(xml_escape "$char_count")" \
@@ -302,7 +310,7 @@ emit_text_block() {
 }
 
 text_mode() {
-  CONVERSION_ENGINE="pymupdf4llm"
+  CONVERSION_ENGINE="$TEXT_ENGINE"
 
   [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
 
@@ -409,8 +417,20 @@ PY
   tmpdir=$(mktemp -d -t read-pdf-text.XXXXXX)
   local tmp_text="${tmpdir}/text.md"
 
-  if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF" >"$tmp_text"; then
-    runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+  if [ "$TEXT_ENGINE" = "markitdown" ]; then
+    if ! uv run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
+      --engine markitdown \
+      --expected-pages "$PDF_PAGES" \
+      "$PDF" >"$tmp_text"; then
+      runtime_err "markitdown (via uv) failed for: $PDF"
+    fi
+  else
+    if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
+      --engine pymupdf4llm \
+      --expected-pages "$PDF_PAGES" \
+      "$PDF" >"$tmp_text"; then
+      runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+    fi
   fi
 
   local char_count
@@ -787,17 +807,39 @@ parse_args() {
         exit 0
         ;;
       --as-text)
+        # Explicit alias of --as-text-fast (documented in --help).
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
           usage >&2
           exit 2
         fi
         MODE="text"
+        TEXT_ENGINE="markitdown"
+        shift
+        ;;
+      --as-text-fast)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="text"
+        TEXT_ENGINE="markitdown"
+        shift
+        ;;
+      --as-text-precise-layout-slow)
+        if [ "$MODE" != "text" ]; then
+          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="text"
+        TEXT_ENGINE="pymupdf4llm"
         shift
         ;;
       --as-raw-text)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
           usage >&2
           exit 2
         fi
@@ -806,7 +848,7 @@ parse_args() {
         ;;
       --as-images)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text, --as-raw-text, or --as-images may be specified"
+          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
           usage >&2
           exit 2
         fi
@@ -815,7 +857,7 @@ parse_args() {
         ;;
       --toc)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --toc, --as-text, --as-raw-text, or --as-images may be specified"
+          err "Only one of --toc, --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
           usage >&2
           exit 2
         fi
