@@ -29,6 +29,10 @@ Usage:
   ${TOOL_NAME} <pdf> [--as-text-fast] [--page-structure] [--doc-structure]
   ${TOOL_NAME} <pdf> --as-text-precise-layout-slow [--page-structure] [--doc-structure]
   ${TOOL_NAME} <pdf> --toc [--page-structure] [--doc-structure]
+  ${TOOL_NAME} <pdf> --toc-pages
+  ${TOOL_NAME} <pdf> --table-pages
+  ${TOOL_NAME} <pdf> --chart-pages
+  ${TOOL_NAME} <pdf> --search "<regex>"
   ${TOOL_NAME} <pdf> --as-raw-text
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
   ${TOOL_NAME} --help | -h
@@ -42,10 +46,18 @@ Modes:
   --as-text-precise-layout-slow  Convert the PDF with pymupdf4llm (layout-aware, can be very slow) and emit:
                                  - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
                                  - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
-  --toc                   Best-effort extraction of TOC/Index/List pages (English+Spanish) with heuristics
+  --toc                   Best-effort extraction of TOC/Index/List pages (English+Spanish+French) with heuristics
                           (e.g., headings + lines ending in page numbers). Emits the same pseudo-XML wrapper
                           as text mode but caps output to 5 pages. If no matches are found, prints plain
                           guidance text (no pseudo-XML) for the agent to inspect the full document.
+  --toc-pages             List pages that might contain TOC/Index/List sections (English+Spanish+French),
+                          using best-effort heuristics. Emits JSON to stdout (may include false positives/negatives).
+  --table-pages           List pages that might contain tables (Table/Tabla/Tableau/Cuadro + numbering heuristics).
+                          Emits JSON to stdout (best-effort; may include false positives/negatives).
+  --chart-pages           List pages that might contain charts/figures/graphics (English+Spanish+French + numbering heuristics).
+                          Emits JSON to stdout (best-effort; may include false positives/negatives).
+  --search                Search the PDF for a regex and emit JSONL (one line per match) with page numbers and
+                          ~50 words of context before and after each match (best-effort; extraction/layout may affect matches).
   --as-raw-text           Emit only the raw markdown output (no pseudo-XML).
   --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
 
@@ -71,6 +83,7 @@ ${script_target_line}  - Note: if you installed via 'make install', re-run it af
   - Text engines:
     - markitdown[pdf] (fast default) via 'uv run --with markitdown[pdf] python scripts/read_pdf_text.py --engine markitdown'
     - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
+  - Search/page listing engine: PyMuPDF via 'uv run --with pymupdf python scripts/read_pdf_search.py' and '.../read_pdf_page_candidates.py'
   - Image engine: pdfinfo + pdftoppm (Poppler)
   - JSONL: in --as-images mode, one line per page is written to stderr. Text modes keep stderr for diagnostics only.
 USAGE
@@ -152,6 +165,7 @@ TEXT_ENGINE="markitdown"  # markitdown | pymupdf4llm (text mode only)
 PAGE_STRUCTURE=false
 DOC_STRUCTURE=false
 TOC_MAX_PAGES=5
+SEARCH_REGEX=""
 
 # Image mode options
 PAGES_SPEC=""
@@ -167,6 +181,8 @@ TOC_MATCHED_PAGES=""
 
 READ_PDF_TEXT_SCRIPT="${SCRIPT_DIR}/read_pdf_text.py"
 READ_PDF_STRUCTURE_SCRIPT="${SCRIPT_DIR}/read_pdf_structure.py"
+READ_PDF_SEARCH_SCRIPT="${SCRIPT_DIR}/read_pdf_search.py"
+READ_PDF_PAGE_CANDIDATES_SCRIPT="${SCRIPT_DIR}/read_pdf_page_candidates.py"
 
 gather_pdf_info() {
   local pdf=$1
@@ -680,6 +696,91 @@ raw_text_mode() {
   fi
 }
 
+toc_pages_mode() {
+  CONVERSION_ENGINE="pymupdf"
+  MODE="toc-pages"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd uv
+  ensure_helper "$READ_PDF_PAGE_CANDIDATES_SCRIPT" "read_pdf_page_candidates.py"
+
+  gather_pdf_info "$PDF"
+
+  if ! uv_run --with pymupdf python "${READ_PDF_PAGE_CANDIDATES_SCRIPT}" \
+    --kind toc \
+    --tool "$TOOL_NAME" \
+    --tool-version "$VERSION" \
+    --pdf-pages "$PDF_PAGES" \
+    "$PDF"; then
+    runtime_err "page candidate detection failed (toc-pages) for: $PDF"
+  fi
+}
+
+table_pages_mode() {
+  CONVERSION_ENGINE="pymupdf"
+  MODE="table-pages"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd uv
+  ensure_helper "$READ_PDF_PAGE_CANDIDATES_SCRIPT" "read_pdf_page_candidates.py"
+
+  gather_pdf_info "$PDF"
+
+  if ! uv_run --with pymupdf python "${READ_PDF_PAGE_CANDIDATES_SCRIPT}" \
+    --kind table \
+    --tool "$TOOL_NAME" \
+    --tool-version "$VERSION" \
+    --pdf-pages "$PDF_PAGES" \
+    "$PDF"; then
+    runtime_err "page candidate detection failed (table-pages) for: $PDF"
+  fi
+}
+
+chart_pages_mode() {
+  CONVERSION_ENGINE="pymupdf"
+  MODE="chart-pages"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd uv
+  ensure_helper "$READ_PDF_PAGE_CANDIDATES_SCRIPT" "read_pdf_page_candidates.py"
+
+  gather_pdf_info "$PDF"
+
+  if ! uv_run --with pymupdf python "${READ_PDF_PAGE_CANDIDATES_SCRIPT}" \
+    --kind chart \
+    --tool "$TOOL_NAME" \
+    --tool-version "$VERSION" \
+    --pdf-pages "$PDF_PAGES" \
+    "$PDF"; then
+    runtime_err "page candidate detection failed (chart-pages) for: $PDF"
+  fi
+}
+
+search_mode() {
+  CONVERSION_ENGINE="pymupdf"
+  MODE="search"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd uv
+  ensure_helper "$READ_PDF_SEARCH_SCRIPT" "read_pdf_search.py"
+
+  gather_pdf_info "$PDF"
+
+  if ! uv_run --with pymupdf python "${READ_PDF_SEARCH_SCRIPT}" \
+    --regex "$SEARCH_REGEX" \
+    --context-words 50 \
+    --tool "$TOOL_NAME" \
+    --tool-version "$VERSION" \
+    --pdf-pages "$PDF_PAGES" \
+    "$PDF"; then
+    runtime_err "search failed for: $PDF"
+  fi
+}
+
 # ---------- Images mode helpers (ported from read-pdf-as-images) ----------
 
 parse_pages() {
@@ -840,7 +941,7 @@ parse_args() {
       --as-text)
         # Explicit alias of --as-text-fast (documented in --help).
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
@@ -850,7 +951,7 @@ parse_args() {
         ;;
       --as-text-fast)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
@@ -860,7 +961,7 @@ parse_args() {
         ;;
       --as-text-precise-layout-slow)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
@@ -870,7 +971,7 @@ parse_args() {
         ;;
       --as-raw-text)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
@@ -879,7 +980,7 @@ parse_args() {
         ;;
       --as-images)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
@@ -888,11 +989,54 @@ parse_args() {
         ;;
       --toc)
         if [ "$MODE" != "text" ]; then
-          err "Only one of --toc, --as-text/--as-text-fast/--as-text-precise-layout-slow, --as-raw-text, or --as-images may be specified"
+          err "Only one mode may be specified"
           usage >&2
           exit 2
         fi
         MODE="toc"
+        shift
+        ;;
+      --toc-pages)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="toc-pages"
+        shift
+        ;;
+      --table-pages)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="table-pages"
+        shift
+        ;;
+      --chart-pages)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="chart-pages"
+        shift
+        ;;
+      --search)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="search"
+        shift || { usage >&2; exit 2; }
+        SEARCH_REGEX=${1:-}
+        if [ -z "$SEARCH_REGEX" ]; then
+          err "--search requires a <regex> argument"
+          usage >&2
+          exit 2
+        fi
         shift
         ;;
       --page-structure)
@@ -975,6 +1119,10 @@ main() {
     toc) toc_mode ;;
     raw) raw_text_mode ;;
     images) images_mode ;;
+    toc-pages) toc_pages_mode ;;
+    table-pages) table_pages_mode ;;
+    chart-pages) chart_pages_mode ;;
+    search) search_mode ;;
     *)
       runtime_err "Unknown mode: $MODE"
       ;;

@@ -38,7 +38,7 @@ _NAV_ENTRY_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Headings + section labels to look for in English + Spanish.
+# Headings + section labels to look for in English + Spanish + French.
 # Note: These are used as *hints*; the extraction is best-effort and we still
 # gate on structure-like patterns to reduce false positives.
 _HEADING_HINTS = [
@@ -57,6 +57,12 @@ _HEADING_HINTS = [
     "contenido",
     "contenidos",
     "sumario",
+    # French
+    "table des matières",
+    "table des matieres",
+    "sommaire",
+    "matières",
+    "matieres",
     # Lists
     "list of figures",
     "list of tables",
@@ -64,20 +70,32 @@ _HEADING_HINTS = [
     "lista de figuras",
     "lista de tablas",
     "lista de ilustraciones",
+    # French list headings
+    "liste des figures",
+    "liste des tableaux",
+    "liste des illustrations",
+    "liste des graphiques",
     "indice de figuras",
     "indice de tablas",
     "indice de ilustraciones",
     # Other front-matter-ish sections that are often list-like
     "glossary",
     "glosario",
+    "glossaire",
     "abbreviations",
     "abreviaturas",
+    "abréviations",
+    "abreviations",
     "acronyms",
     "siglas",
+    "acronymes",
+    "sigles",
     "appendix",
     "appendices",
     "apendice",
     "apendices",
+    "annexe",
+    "annexes",
     "anexo",
     "anexos",
 ]
@@ -91,16 +109,25 @@ _STRONG_HEADING_HINTS = [
     "contenido",
     "contenidos",
     "sumario",
+    # French
+    "table des matières",
+    "table des matieres",
+    "sommaire",
     "index",
     "indice",
     "list of figures",
     "list of tables",
     "lista de figuras",
     "lista de tablas",
+    "liste des figures",
+    "liste des tableaux",
     "glossary",
     "glosario",
+    "glossaire",
     "abbreviations",
     "abreviaturas",
+    "abréviations",
+    "abreviations",
 ]
 
 
