@@ -1,0 +1,3 @@
+# Keep uv's cache inside the repo so read-pdf works in sandboxed environments
+# where ~/.cache may not be writable/readable.
+cache-dir = "tmp/uv_cache"

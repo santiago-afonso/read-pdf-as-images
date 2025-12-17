@@ -84,6 +84,18 @@ need_cmd() {
   fi
 }
 
+uv_run() {
+  # In sandboxed environments, uv's default cache dir (~/.cache/uv) may not be usable.
+  # Prefer a workspace-local cache under ./tmp/uv_cache when possible; fall back to
+  # --no-cache to avoid hard failures.
+  local cache_dir="$PWD/tmp/uv_cache"
+  if mkdir -p "$cache_dir" >/dev/null 2>&1; then
+    uv --cache-dir "$cache_dir" run "$@"
+  else
+    uv --no-cache run "$@"
+  fi
+}
+
 runtime_err() {
   local msg=$1
   {
@@ -333,12 +345,12 @@ text_mode() {
   if [ "$PAGE_STRUCTURE" = true ] || [ "$DOC_STRUCTURE" = true ]; then
     ensure_helper "$READ_PDF_STRUCTURE_SCRIPT" "read_pdf_structure.py"
     local struct_json
-    if ! struct_json=$(uv run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
+    if ! struct_json=$(uv_run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
       runtime_err "pymupdf4llm structure scan failed for: $PDF"
     fi
 
     if [ "$PAGE_STRUCTURE" = true ]; then
-      PAGE_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+      PAGE_STRUCTURE_XML=$(uv_run python - "$struct_json" <<'PY'
 import json
 import sys
 
@@ -372,7 +384,7 @@ PY
     fi
 
     if [ "$DOC_STRUCTURE" = true ]; then
-      DOC_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+      DOC_STRUCTURE_XML=$(uv_run python - "$struct_json" <<'PY'
 import json
 import sys
 
@@ -433,7 +445,7 @@ PY
     # markitdown/pdfminer can emit noisy diagnostics (often benign) to stderr.
     # Keep stdout clean (pseudo-XML only) by capturing stderr and only surfacing
     # it if the conversion fails.
-    if ! uv run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
+    if ! uv_run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
       --engine markitdown \
       --expected-pages "$PDF_PAGES" \
       "$PDF" >"$tmp_text" 2>"$tmp_err"; then
@@ -444,7 +456,7 @@ PY
       runtime_err "markitdown (via uv) failed for: $PDF"
     fi
   else
-    if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
+    if ! uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
       --engine pymupdf4llm \
       --expected-pages "$PDF_PAGES" \
       "$PDF" >"$tmp_text"; then
@@ -473,12 +485,12 @@ toc_mode() {
   if [ "$PAGE_STRUCTURE" = true ] || [ "$DOC_STRUCTURE" = true ]; then
     ensure_helper "$READ_PDF_STRUCTURE_SCRIPT" "read_pdf_structure.py"
     local struct_json
-    if ! struct_json=$(uv run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
+    if ! struct_json=$(uv_run --with pymupdf4llm python "${READ_PDF_STRUCTURE_SCRIPT}" "$PDF"); then
       runtime_err "pymupdf4llm structure scan failed for: $PDF"
     fi
 
     if [ "$PAGE_STRUCTURE" = true ]; then
-      PAGE_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+      PAGE_STRUCTURE_XML=$(uv_run python - "$struct_json" <<'PY'
 import json
 import sys
 
@@ -503,7 +515,7 @@ PY
     fi
 
     if [ "$DOC_STRUCTURE" = true ]; then
-      DOC_STRUCTURE_XML=$(python3 - "$struct_json" <<'PY'
+      DOC_STRUCTURE_XML=$(uv_run python - "$struct_json" <<'PY'
 import json
 import sys
 
@@ -561,7 +573,7 @@ PY
   local tmp_meta="${tmpdir}/toc_meta.json"
 
   local code=0
-  if uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
+  if uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
     --filter toc \
     --toc-max-pages "$TOC_MAX_PAGES" \
     --meta-json-out "$tmp_meta" \
@@ -601,7 +613,7 @@ MSG
 
   local toc_full_char_count
   toc_full_char_count=$(
-    python3 - "$tmp_meta" <<'PY'
+    uv_run python - "$tmp_meta" <<'PY'
 import json
 import sys
 
@@ -613,7 +625,7 @@ PY
   )
 
   TOC_MATCHED_PAGES=$(
-    python3 - "$tmp_meta" <<'PY'
+    uv_run python - "$tmp_meta" <<'PY'
 import json
 import sys
 
@@ -625,7 +637,7 @@ print(",".join(str(p) for p in pages))
 PY
   )
 
-  TOC_EXTRACTION_XML=$(python3 - "$TOC_MATCHED_PAGES" "$TOC_MAX_PAGES" <<'PY'
+  TOC_EXTRACTION_XML=$(uv_run python - "$TOC_MATCHED_PAGES" "$TOC_MAX_PAGES" <<'PY'
 import sys
 
 def esc(val: str) -> str:
@@ -663,7 +675,7 @@ raw_text_mode() {
   need_cmd uv
   ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
 
-  if ! uv run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF"; then
+  if ! uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF"; then
     runtime_err "pymupdf4llm (via uv) failed for: $PDF"
   fi
 }
