@@ -6,15 +6,18 @@ LEGACY_SCRIPT := scripts/read-pdf-as-images
 LEGACY_TARGET := $(BINDIR)/read-pdf-as-images
 HELPER_SCRIPTS := scripts/read_pdf_text.py scripts/read_pdf_structure.py scripts/read_pdf_search.py scripts/read_pdf_page_candidates.py
 HELPER_TARGETS := $(addprefix $(BINDIR)/,$(notdir $(HELPER_SCRIPTS)))
+PRIME_CACHE ?= 1
 
-.PHONY: help install uninstall lint test
+.PHONY: help install uninstall lint test prime-cache
 .PHONY: install-dev
 
 help:
 	@echo "Targets:"
 	@echo "  install    Install CLI to $(TARGET) (and legacy wrapper to $(LEGACY_TARGET))"
+	@echo "            (default: primes uv cache; set PRIME_CACHE=0 to skip)"
 	@echo "  install-dev Symlink CLI + helpers into $(BINDIR) (dev mode: no stale installs)"
 	@echo "  uninstall  Remove installed CLI"
+	@echo "  prime-cache Prefetch Python deps into uv cache"
 	@echo "  lint       Run shellcheck on scripts"
 	@echo "  test       Generate a tiny PDF and run an integration smoke test"
 	@echo "  help       Show this message"
@@ -29,6 +32,11 @@ install: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
 	@echo "Installed helpers: $(HELPER_TARGETS)"
 	@command -v read-pdf >/dev/null 2>&1 || \
 	  echo "Note: Ensure $(BINDIR) is in your PATH"
+	@if [ "$(PRIME_CACHE)" != "0" ]; then \
+	  echo "Priming uv cache (set PRIME_CACHE=0 to skip)..." ; \
+	  READ_PDF_UV_OFFLINE=0 "$(TARGET)" --prime-cache || \
+	    echo "Note: cache priming failed (likely no network). Re-run later with: make prime-cache" ; \
+	fi
 
 install-dev: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
 	@mkdir -p "$(BINDIR)"
@@ -45,6 +53,10 @@ install-dev: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
 uninstall:
 	@rm -f "$(TARGET)" "$(LEGACY_TARGET)" $(HELPER_TARGETS)
 	@echo "Removed: $(TARGET), $(LEGACY_TARGET), and helper scripts"
+
+prime-cache:
+	@$(MAKE) install PRIME_CACHE=0
+	@READ_PDF_UV_OFFLINE=0 "$(TARGET)" --prime-cache
 
 lint:
 	@shellcheck $(SCRIPT) $(LEGACY_SCRIPT)
