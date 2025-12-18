@@ -52,6 +52,12 @@ make install
 # ensure ~/.local/bin is on your PATH
 ```
 
+By default, `make install` also primes the `uv` cache (downloads `markitdown[pdf]`, `pymupdf`, `pymupdf4llm`) so later runs in restricted/offline environments don’t need network. To skip priming:
+
+```
+make install PRIME_CACHE=0
+```
+
 The install target also places the helper Python scripts (`read_pdf_text.py`, `read_pdf_structure.py`) next to the CLI binary so `read-pdf` works from any directory. Re-run `make install` after updating the repo to refresh those helpers.
 
 Development convenience (no stale installs):
@@ -72,6 +78,7 @@ read-pdf <pdf> --as-text-precise-layout-slow [--page-structure] [--doc-structure
 read-pdf <pdf> --toc [--page-structure] [--doc-structure]
 read-pdf <pdf> --as-raw-text
 read-pdf <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+read-pdf --prime-cache
 read-pdf --help | -h
 read-pdf --version | -V
 ```
@@ -116,3 +123,4 @@ This prints:
 - Page range parsing accepts lists and ranges, e.g., `1,3,7-12`.
 - Default text mode relies on `markitdown[pdf]`; `read-pdf` uses `uv run --with markitdown[pdf]` under the hood, so you only need `uv` installed and network access the first time to fetch the package (subsequent runs will use the cached environment).
 - Precise (slow) text mode relies on `pymupdf4llm`; use `--as-text-precise-layout-slow` when you need layout-aware extraction and can tolerate higher runtime.
+- To force offline behavior (no network attempts), set `READ_PDF_UV_OFFLINE=1`.
