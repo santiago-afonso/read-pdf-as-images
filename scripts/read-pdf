@@ -12,6 +12,11 @@ TOOL_NAME="read-pdf"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Dependency fetching / cache behavior (uv):
+# - Default: online (READ_PDF_UV_OFFLINE=0) so missing deps can be fetched.
+# - To force offline (fail-fast, no network), set READ_PDF_UV_OFFLINE=1.
+READ_PDF_UV_OFFLINE="${READ_PDF_UV_OFFLINE:-0}"
+
 usage() {
   local script_target=""
   local script_target_line=""
@@ -35,6 +40,7 @@ Usage:
   ${TOOL_NAME} <pdf> --search "<regex>"
   ${TOOL_NAME} <pdf> --as-raw-text
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+  ${TOOL_NAME} --prime-cache
   ${TOOL_NAME} --help | -h
   ${TOOL_NAME} --version | -V
 
@@ -76,6 +82,14 @@ Exit codes:
   2  usage error (prints this help)
   3+ runtime errors (dependencies, IO, conversions)
 
+Dependency notes:
+  - Python deps are fetched on demand via uv.
+  - Default behavior is online. To force offline behavior (no network), set:
+      READ_PDF_UV_OFFLINE=1
+  - To prefetch and warm the cache once (recommended for restricted environments),
+    run:
+      ${TOOL_NAME} --prime-cache
+
 Operational context:
   - Tool: ${TOOL_NAME} ${VERSION}
   - Script path: ${BASH_SOURCE[0]}
@@ -91,28 +105,70 @@ USAGE
 
 err() { echo "ERROR: $*" >&2; }
 
+maybe_print_offline_cache_hint() {
+  if [ "${READ_PDF_UV_OFFLINE:-0}" != "0" ]; then
+    echo "Hint: running with uv offline (READ_PDF_UV_OFFLINE=1). If dependencies are missing, re-run once with READ_PDF_UV_OFFLINE=0 or run 'read-pdf --prime-cache' in an online environment." >&2
+  fi
+}
+
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     runtime_err "Missing dependency: $1"
   fi
 }
 
-uv_run() {
-  # In sandboxed environments, uv's default cache dir (~/.cache/uv) may not be usable.
-  # Prefer a workspace-local cache under ./tmp/uv_cache when possible; fall back to
-  # --no-cache to avoid hard failures.
-  local cache_dir="$PWD/tmp/uv_cache"
-  if mkdir -p "$cache_dir" >/dev/null 2>&1; then
-    uv --cache-dir "$cache_dir" run "$@"
-  else
-    uv --no-cache run "$@"
+resolve_uv_cache_dir() {
+  # Prefer a persistent cache dir (shared across working directories) when possible,
+  # but fall back to a workspace-local cache under ./tmp/uv_cache.
+  if [ -n "${READ_PDF_UV_CACHE_DIR:-}" ]; then
+    printf '%s' "${READ_PDF_UV_CACHE_DIR}"
+    return 0
   fi
+  if [ -n "${UV_CACHE_DIR:-}" ]; then
+    printf '%s' "${UV_CACHE_DIR}"
+    return 0
+  fi
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    printf '%s/uv' "${XDG_CACHE_HOME%/}"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ]; then
+    printf '%s/.cache/uv' "${HOME%/}"
+    return 0
+  fi
+  printf '%s/tmp/uv_cache' "$PWD"
+}
+
+uv_run() {
+  local cache_dir
+  cache_dir=$(resolve_uv_cache_dir)
+
+  local -a uv_args=()
+  if [ "${READ_PDF_UV_OFFLINE:-0}" != "0" ]; then
+    uv_args+=(--offline)
+  fi
+
+  if mkdir -p "$cache_dir" >/dev/null 2>&1; then
+    uv "${uv_args[@]}" --cache-dir "$cache_dir" run "$@"
+    return 0
+  fi
+
+  # If the preferred cache dir isn't writable (common in sandboxed runs), fall back
+  # to a workspace-local cache before giving up on caching entirely.
+  local fallback_dir="$PWD/tmp/uv_cache"
+  if [ "$cache_dir" != "$fallback_dir" ] && mkdir -p "$fallback_dir" >/dev/null 2>&1; then
+    uv "${uv_args[@]}" --cache-dir "$fallback_dir" run "$@"
+    return 0
+  fi
+
+  uv "${uv_args[@]}" --no-cache run "$@"
 }
 
 runtime_err() {
   local msg=$1
   {
     echo "ERROR: ${msg}"
+    maybe_print_offline_cache_hint
     echo "Context: tool=${TOOL_NAME} version=${VERSION} mode=${MODE:-unknown} pdf=${PDF:-<none>} engine=${CONVERSION_ENGINE:-<unknown>}"
     echo "Hint: run '${TOOL_NAME} --help' for usage and context."
   } >&2
@@ -696,6 +752,46 @@ raw_text_mode() {
   fi
 }
 
+prime_cache_mode() {
+  CONVERSION_ENGINE="uv"
+  MODE="prime-cache"
+
+  need_cmd uv
+
+  local cache_dir
+  cache_dir=$(resolve_uv_cache_dir)
+
+  echo "Priming uv cache for ${TOOL_NAME} (cache_dir=${cache_dir})..." >&2
+  echo "  - markitdown[pdf]" >&2
+  echo "  - pymupdf" >&2
+  echo "  - pymupdf4llm" >&2
+
+  local old_offline="$READ_PDF_UV_OFFLINE"
+  READ_PDF_UV_OFFLINE=0
+
+  # Warm each optional engine explicitly so later offline/restricted runs don't need network.
+  uv_run --with 'markitdown[pdf]' python - <<'PY'
+from markitdown import MarkItDown
+
+_ = MarkItDown()
+print("ok: markitdown")
+PY
+  uv_run --with pymupdf python - <<'PY'
+import fitz
+
+print("ok: pymupdf")
+PY
+  uv_run --with pymupdf4llm --with pymupdf python - <<'PY'
+import fitz
+import pymupdf4llm
+
+print("ok: pymupdf4llm")
+PY
+
+  READ_PDF_UV_OFFLINE="$old_offline"
+  echo "Prime complete." >&2
+}
+
 toc_pages_mode() {
   CONVERSION_ENGINE="pymupdf"
   MODE="toc-pages"
@@ -938,6 +1034,15 @@ parse_args() {
         echo "${TOOL_NAME} ${VERSION}"
         exit 0
         ;;
+      --prime-cache)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="prime-cache"
+        shift
+        ;;
       --as-text)
         # Explicit alias of --as-text-fast (documented in --help).
         if [ "$MODE" != "text" ]; then
@@ -1105,6 +1210,15 @@ parse_args() {
     esac
   done
 
+  if [ "$MODE" = "prime-cache" ]; then
+    if [ -n "${PDF:-}" ]; then
+      err "--prime-cache does not take a <pdf> argument"
+      usage >&2
+      exit 2
+    fi
+    return 0
+  fi
+
   if [ -z "${PDF:-}" ]; then
     err "Missing <pdf> argument"
     usage >&2
@@ -1115,6 +1229,7 @@ parse_args() {
 main() {
   parse_args "$@"
   case "$MODE" in
+    prime-cache) prime_cache_mode ;;
     text) text_mode ;;
     toc) toc_mode ;;
     raw) raw_text_mode ;;
