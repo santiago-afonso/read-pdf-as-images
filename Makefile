@@ -62,8 +62,14 @@ lint:
 	@shellcheck $(SCRIPT) $(LEGACY_SCRIPT)
 
 test: install
-	@echo "%!\n/Times-Roman findfont 24 scalefont setfont\n72 700 moveto\n(Hello PDF) show\nshowpage" > test.ps
-	@ps2pdf test.ps test.pdf
-	@"$(TARGET)" test.pdf --as-images --pages "1"
+	@mkdir -p tmp
+	@echo "%!\n/Times-Roman findfont 24 scalefont setfont\n72 700 moveto\n(Hello PDF) show\nshowpage" > tmp/test.ps
+	@ps2pdf tmp/test.ps tmp/test.pdf
+	@"$(TARGET)" tmp/test.pdf --as-images --pages "1" > tmp/test.stdout 2> tmp/test.stderr
 	@test -f tmp/pdf_renders/test/page-001.png
+	@grep -q "gpt-5" tmp/test.stdout
+	@grep -q "gemini-3" tmp/test.stdout
+	@! grep -q "gpt-5-mini" tmp/test.stdout
+	@! grep -q "gpt-5-nano" tmp/test.stdout
+	@grep -q '"page":1' tmp/test.stderr
 	@echo "Integration smoke test passed"
