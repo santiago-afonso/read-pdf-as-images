@@ -7,7 +7,7 @@ set -euo pipefail
 # - Emit raw markdown output only (--as-raw-text).
 # - Render pages to images (--as-images) and emit a JSONL manifest to stderr.
 
-VERSION="0.1.0"
+VERSION="0.1.3"
 TOOL_NAME="read-pdf"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -99,7 +99,7 @@ ${script_target_line}  - Note: if you installed via 'make install', re-run it af
     - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
   - Search/page listing engine: PyMuPDF via 'uv run --with pymupdf python scripts/read_pdf_search.py' and '.../read_pdf_page_candidates.py'
   - Image engine: pdfinfo + pdftoppm (Poppler)
-  - JSONL: in --as-images mode, one line per page is written to stderr. Text modes keep stderr for diagnostics only.
+  - JSONL: in --as-images mode, one line per page is written to stderr. Stdout prints token-estimate totals/averages for gpt-5 and Gemini 3 image inputs.
 USAGE
 }
 
@@ -215,6 +215,8 @@ PDF_CREATOR=""
 PDF_VERSION=""
 PDF_SIZE_BYTES=0
 PDF_SIZE_KB=0
+PDF_PAGE_W_PTS=""
+PDF_PAGE_H_PTS=""
 
 MODE="text"        # text | raw | images
 TEXT_ENGINE="markitdown"  # markitdown | pymupdf4llm (text mode only)
@@ -266,6 +268,13 @@ gather_pdf_info() {
 
   if ! [[ "$PDF_PAGES" =~ ^[0-9]+$ ]]; then
     runtime_err "Could not determine page count for: $pdf"
+  fi
+
+  local page_size
+  page_size=$(printf '%s\n' "$info" | sed -n 's/^Page size:[[:space:]]*//p' | head -n1)
+  if [ -n "$page_size" ]; then
+    PDF_PAGE_W_PTS=$(printf '%s\n' "$page_size" | awk '{print $1}')
+    PDF_PAGE_H_PTS=$(printf '%s\n' "$page_size" | awk '{print $3}')
   fi
 
   local bytes
@@ -917,6 +926,72 @@ group_contiguous() {
        END{ if (start!=-1) printf "%d %d\n", start, prev }'
 }
 
+image_dimensions_px() {
+  local img=$1
+
+  local dims=""
+  if command -v file >/dev/null 2>&1; then
+    local desc=""
+    desc=$(file -b -- "$img" 2>/dev/null || true)
+    if [ -n "$desc" ]; then
+      dims=$(printf '%s' "$desc" | awk 'match($0, /([0-9]+)[[:space:]]*x[[:space:]]*([0-9]+)/, m) {print m[1], m[2]; exit}')
+    fi
+  fi
+
+  if [ -z "$dims" ]; then
+    if [[ "${PDF_PAGE_W_PTS:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [[ "${PDF_PAGE_H_PTS:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      dims=$(awk -v wpts="$PDF_PAGE_W_PTS" -v hpts="$PDF_PAGE_H_PTS" -v dpi="$DPI" 'BEGIN { w=(wpts/72.0)*dpi; h=(hpts/72.0)*dpi; printf "%d %d", int(w+0.5), int(h+0.5) }')
+    fi
+  fi
+
+  if [ -z "$dims" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$dims"
+}
+
+estimate_tokens_gpt5_high_detail() {
+  local w=$1
+  local h=$2
+  awk -v w="$w" -v h="$h" -v base=70 -v tile=140 '
+function ceil(x) { return (x == int(x)) ? x : int(x) + 1 }
+BEGIN {
+  max = (w > h) ? w : h
+  s1 = (max > 2048) ? 2048.0 / max : 1.0
+  w1 = w * s1
+  h1 = h * s1
+  min = (w1 < h1) ? w1 : h1
+  s2 = 768.0 / min
+  w2 = w1 * s2
+  h2 = h1 * s2
+  tiles = ceil(w2 / 512.0) * ceil(h2 / 512.0)
+  tokens = base + tile * tiles
+  printf "%d", tokens
+}'
+}
+
+gemini3_image_tokens_for_dpi() {
+  # Gemini 3 image token counts are based on media_resolution budgets (not DPI).
+  # To keep stdout concise and deterministic, we select a single media_resolution
+  # from the user-supplied --dpi as a best-effort heuristic.
+  #
+  # Source (as of 2026-01-13): https://ai.google.dev/gemini-api/docs/media-resolution
+  #
+  # Mapping heuristic:
+  # - dpi <= 150  -> LOW    (280 tokens)
+  # - 151..239    -> MEDIUM (560 tokens)
+  # - >= 240      -> HIGH   (1120 tokens)
+  local dpi=$1
+  if (( dpi <= 150 )); then
+    printf '%s %s\n' "MEDIA_RESOLUTION_LOW" "280"
+  elif (( dpi < 240 )); then
+    printf '%s %s\n' "MEDIA_RESOLUTION_MEDIUM" "560"
+  else
+    printf '%s %s\n' "MEDIA_RESOLUTION_HIGH" "1120"
+  fi
+}
+
 images_mode() {
   CONVERSION_ENGINE="pdftoppm"
 
@@ -983,6 +1058,9 @@ images_mode() {
     pdftoppm "$fmtflag" -rx "$DPI" -ry "$DPI" -f "$start" -l "$end" -- "$PDF" "$OUTDIR/page" >/dev/null
   done
 
+  local total_gpt5=0
+  local pages_rendered=0
+
   for p in "${pages[@]}"; do
     local fname
     printf -v fname "%s/page-%0${pad}d.%s" "$OUTDIR" "$p" "$FORMAT"
@@ -1005,6 +1083,18 @@ images_mode() {
         runtime_err "Expected output missing: $fname"
       fi
     fi
+
+    local w h
+    if ! read -r w h < <(image_dimensions_px "$fname"); then
+      runtime_err "Could not determine rendered image dimensions for: $fname"
+    fi
+
+    local gpt5_tokens
+    gpt5_tokens=$(estimate_tokens_gpt5_high_detail "$w" "$h")
+
+    total_gpt5=$(( total_gpt5 + gpt5_tokens ))
+    pages_rendered=$(( pages_rendered + 1 ))
+
     printf '{"page":%d,"path":"%s","dpi":%d,"format":"%s","mode":"images","pdf_path":"%s","pdf_basename":"%s","tool":"%s","tool_version":"%s","engine":"%s"}\n' \
       "$p" \
       "$(json_escape "$fname")" \
@@ -1016,6 +1106,21 @@ images_mode() {
       "$(json_escape "$VERSION")" \
       "$(json_escape "$CONVERSION_ENGINE")" >&2
   done
+
+  local avg_gpt5
+  avg_gpt5=$(awk -v t="$total_gpt5" -v n="$pages_rendered" 'BEGIN{ if(n<=0){printf "0"} else {printf "%.2f", t/n} }')
+
+  local gemini_resolution gemini_tokens_per_image
+  read -r gemini_resolution gemini_tokens_per_image < <(gemini3_image_tokens_for_dpi "$DPI")
+  local gemini_total=$(( pages_rendered * gemini_tokens_per_image ))
+
+  printf 'Token estimate (images only): gpt-5(detail=high) total=%d avg_per_page=%s; gemini-3*(%s, derived_from_dpi=%d) total=%d avg_per_page=%d\n' \
+    "$total_gpt5" \
+    "$avg_gpt5" \
+    "$gemini_resolution" \
+    "$DPI" \
+    "$gemini_total" \
+    "$gemini_tokens_per_image"
 }
 
 parse_args() {
