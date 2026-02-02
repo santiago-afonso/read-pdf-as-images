@@ -27,13 +27,13 @@ Why: Codex/CLI agents need deterministic file paths to attach images *and* a rob
   - Defaults: PNG @ 220 DPI.
   - Output layout: `tmp/pdf_renders/<pdf-basename>/page-<NNN>.png`.
   - JSONL per page to stderr, now including tool and conversion metadata:
-    `{"page":7,"path":"…/page-007.png","dpi":220,"format":"png","mode":"images","pdf_path":"…","pdf_basename":"…","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}`.
+    `{"page":7,"path":"…/page-007.png","dpi":220,"format":"png","mode":"images","pdf_path":"…","pdf_basename":"…","tool":"read-pdf","tool_version":"0.1.3","engine":"pdftoppm"}`.
 - Optional structural metadata flags (text mode):
   - `--page-structure` to include per-page summaries (has_text, word_count, image_count, table_count).
   - `--doc-structure` to include bookmarks and link lists (internal/external destinations).
 - Clean separation of channels:
   - Text modes: pseudo-XML goes to stdout; stderr reserved for diagnostics.
-  - Image mode: JSONL goes to stderr; stdout stays empty for easy piping.
+  - Image mode: JSONL goes to stderr; stdout prints a token-estimate summary (`gpt-5` + Gemini 3) after rendering.
 
 ## Install
 Dependencies:
@@ -90,7 +90,8 @@ Defaults:
 
 Behavior (images mode):
 - Filenames: `page-<NNN>.<ext>` (zero‑padded; width = max(3, digits(total_pages))).
-- JSONL is written to stderr, one line per page; stdout stays empty.
+- JSONL is written to stderr, one line per page (stable manifest for tooling).
+- Stdout prints a small token-estimate summary for `gpt-5` + Gemini 3 image inputs (total + per-page average).
 
 Example (images):
 ```
@@ -99,8 +100,8 @@ read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf" --as-images --pag
 
 Example JSONL (stderr):
 ```
-{"page":1,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-001.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}
-{"page":2,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-002.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.0","engine":"pdftoppm"}
+{"page":1,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-001.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.3","engine":"pdftoppm"}
+{"page":2,"path":"tmp/pdf_renders/FY25 Theme Taxonomy. Mar 2025/page-002.png","dpi":220,"format":"png","mode":"images","pdf_path":"Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf","pdf_basename":"FY25 Theme Taxonomy. Mar 2025.pdf","tool":"read-pdf","tool_version":"0.1.3","engine":"pdftoppm"}
 ```
 
 Example (text with metadata):
