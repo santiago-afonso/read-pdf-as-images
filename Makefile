@@ -72,4 +72,9 @@ test: install
 	@! grep -q "gpt-5-mini" tmp/test.stdout
 	@! grep -q "gpt-5-nano" tmp/test.stdout
 	@grep -q '"page":1' tmp/test.stderr
+	@"$(TARGET)" tmp/test.pdf --as-images --pages "1" --format jpeg > tmp/test-jpeg.stdout 2> tmp/test-jpeg.stderr
+	@test -f tmp/pdf_renders/test/page-001.jpg
+	@grep -Fq '"page":1' tmp/test-jpeg.stderr
+	@grep -Fq '"format":"jpeg"' tmp/test-jpeg.stderr
+	@grep -Fq 'page-001.jpg' tmp/test-jpeg.stderr
 	@echo "Integration smoke test passed"
