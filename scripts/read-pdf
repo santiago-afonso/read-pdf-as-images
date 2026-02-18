@@ -39,6 +39,7 @@ Usage:
   ${TOOL_NAME} <pdf> --chart-pages
   ${TOOL_NAME} <pdf> --search "<regex>"
   ${TOOL_NAME} <pdf> --as-raw-text
+  ${TOOL_NAME} <pdf> [mode flags...] [--max-output-tokens 16384]
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
   ${TOOL_NAME} --prime-cache
   ${TOOL_NAME} --help | -h
@@ -66,6 +67,9 @@ Modes:
                           ~50 words of context before and after each match (best-effort; extraction/layout may affect matches).
   --as-raw-text           Emit only the raw markdown output (no pseudo-XML).
   --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
+  --max-output-tokens N  Cap stdout text output at N tokens (estimated with tiktoken). Default: 16384.
+                         Applies to all text stdout modes (including --search/--toc-pages/--table-pages/--chart-pages).
+                         Set N=0 to disable truncation.
 
 Optional metadata flags (text mode only):
   --page-structure        Include per-page flags/counts in <pdf-metadata> (has_text, word_count, image_count, table_count).
@@ -241,6 +245,9 @@ READ_PDF_TEXT_SCRIPT="${SCRIPT_DIR}/read_pdf_text.py"
 READ_PDF_STRUCTURE_SCRIPT="${SCRIPT_DIR}/read_pdf_structure.py"
 READ_PDF_SEARCH_SCRIPT="${SCRIPT_DIR}/read_pdf_search.py"
 READ_PDF_PAGE_CANDIDATES_SCRIPT="${SCRIPT_DIR}/read_pdf_page_candidates.py"
+READ_PDF_TRUNCATE_SCRIPT="${SCRIPT_DIR}/truncate_text_output.py"
+
+MAX_OUTPUT_TOKENS=16384
 
 gather_pdf_info() {
   local pdf=$1
@@ -886,6 +893,23 @@ search_mode() {
   fi
 }
 
+emit_stdout_with_token_truncation() {
+  local input_file=$1
+  ensure_helper "$READ_PDF_TRUNCATE_SCRIPT" "truncate_text_output.py"
+  if uv_run --with tiktoken python "${READ_PDF_TRUNCATE_SCRIPT}" \
+    --input "$input_file" \
+    --max-tokens "$MAX_OUTPUT_TOKENS"; then
+    return 0
+  fi
+  # Fallback: still enforce truncation with approximate token counting if
+  # tiktoken cannot be resolved (for example, strict offline mode with no cache).
+  if ! uv_run python "${READ_PDF_TRUNCATE_SCRIPT}" \
+    --input "$input_file" \
+    --max-tokens "$MAX_OUTPUT_TOKENS"; then
+    runtime_err "failed to post-process output truncation"
+  fi
+}
+
 # ---------- Images mode helpers (ported from read-pdf-as-images) ----------
 
 parse_pages() {
@@ -1304,6 +1328,16 @@ parse_args() {
         OUTDIR=${1:-}
         shift
         ;;
+      --max-output-tokens)
+        shift || { usage >&2; exit 2; }
+        MAX_OUTPUT_TOKENS=${1:-}
+        if ! [[ "$MAX_OUTPUT_TOKENS" =~ ^[0-9]+$ ]]; then
+          err "--max-output-tokens requires a non-negative integer"
+          usage >&2
+          exit 2
+        fi
+        shift
+        ;;
       --*)
         err "Unknown flag: $1"
         usage >&2
@@ -1340,20 +1374,25 @@ parse_args() {
 
 main() {
   parse_args "$@"
+  local tmpdir
+  tmpdir=$(mktemp -d -t read-pdf-stdout.XXXXXX)
+  local tmp_stdout="${tmpdir}/stdout.txt"
+  trap 'rm -rf "$tmpdir"' RETURN
   case "$MODE" in
-    prime-cache) prime_cache_mode ;;
-    text) text_mode ;;
-    toc) toc_mode ;;
-    raw) raw_text_mode ;;
-    images) images_mode ;;
-    toc-pages) toc_pages_mode ;;
-    table-pages) table_pages_mode ;;
-    chart-pages) chart_pages_mode ;;
-    search) search_mode ;;
+    prime-cache) prime_cache_mode >"$tmp_stdout" ;;
+    text) text_mode >"$tmp_stdout" ;;
+    toc) toc_mode >"$tmp_stdout" ;;
+    raw) raw_text_mode >"$tmp_stdout" ;;
+    images) images_mode >"$tmp_stdout" ;;
+    toc-pages) toc_pages_mode >"$tmp_stdout" ;;
+    table-pages) table_pages_mode >"$tmp_stdout" ;;
+    chart-pages) chart_pages_mode >"$tmp_stdout" ;;
+    search) search_mode >"$tmp_stdout" ;;
     *)
       runtime_err "Unknown mode: $MODE"
       ;;
   esac
+  emit_stdout_with_token_truncation "$tmp_stdout"
 }
 
 main "$@"

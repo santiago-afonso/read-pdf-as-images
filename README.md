@@ -22,6 +22,11 @@ Why: Codex/CLI agents need deterministic file paths to attach images *and* a rob
   - If no matches are found, prints plain guidance text (no pseudo-XML) so agents can fall back to full text or image rendering.
 - Raw text mode (`--as-raw-text`):
   - Emits only raw markdown output (no pseudo-XML), using the same `pymupdf4llm`-based converter (still includes `<!-- PAGE n -->` markers).
+- Output truncation across text modes:
+  - All stdout text modes are capped by default at roughly 16k tokens, estimated with `tiktoken` (`o200k_base`).
+  - Applies to full text, TOC mode, raw text, regex search JSONL, and page-candidate JSON modes.
+  - Override with `--max-output-tokens N` (set `0` to disable truncation).
+  - When truncation occurs, output includes a notice with estimated total tokens and the configured cap.
 - Images mode (`--as-images`):
   - Pages → images with `pdftoppm` (Poppler).
   - Defaults: PNG @ 220 DPI.
@@ -77,6 +82,7 @@ read-pdf <pdf> [--as-text-fast] [--page-structure] [--doc-structure]
 read-pdf <pdf> --as-text-precise-layout-slow [--page-structure] [--doc-structure]
 read-pdf <pdf> --toc [--page-structure] [--doc-structure]
 read-pdf <pdf> --as-raw-text
+read-pdf <pdf> [mode flags...] [--max-output-tokens 16384]
 read-pdf <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
 read-pdf --prime-cache
 read-pdf --help | -h
@@ -87,6 +93,7 @@ Defaults:
 - `--format png`
 - `--dpi 220`
 - `--outdir tmp/pdf_renders/<pdf-basename-no-ext>/`
+- `--max-output-tokens 16384` (stdout text cap; `0` disables)
 
 Behavior (images mode):
 - Filenames: `page-<NNN>.<ext>` (zero‑padded; width = max(3, digits(total_pages))).

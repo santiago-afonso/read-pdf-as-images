@@ -4,7 +4,7 @@ SCRIPT := scripts/read-pdf
 TARGET := $(BINDIR)/read-pdf
 LEGACY_SCRIPT := scripts/read-pdf-as-images
 LEGACY_TARGET := $(BINDIR)/read-pdf-as-images
-HELPER_SCRIPTS := scripts/read_pdf_text.py scripts/read_pdf_structure.py scripts/read_pdf_search.py scripts/read_pdf_page_candidates.py
+HELPER_SCRIPTS := scripts/read_pdf_text.py scripts/read_pdf_structure.py scripts/read_pdf_search.py scripts/read_pdf_page_candidates.py scripts/truncate_text_output.py
 HELPER_TARGETS := $(addprefix $(BINDIR)/,$(notdir $(HELPER_SCRIPTS)))
 PRIME_CACHE ?= 1
 
