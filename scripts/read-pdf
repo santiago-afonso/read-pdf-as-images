@@ -560,7 +560,7 @@ PY
 }
 
 toc_mode() {
-  CONVERSION_ENGINE="pymupdf4llm"
+  CONVERSION_ENGINE="markitdown"
   MODE="toc"
 
   [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
@@ -661,10 +661,12 @@ PY
   local tmp_meta="${tmpdir}/toc_meta.json"
 
   local code=0
-  if uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
+  if uv_run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
+    --engine markitdown \
     --filter toc \
     --toc-max-pages "$TOC_MAX_PAGES" \
     --meta-json-out "$tmp_meta" \
+    --expected-pages "$PDF_PAGES" \
     "$PDF" >"$tmp_text"; then
     :
   else
@@ -682,7 +684,7 @@ Next steps:
 MSG
       return 0
     fi
-    runtime_err "pymupdf4llm (via uv) failed for: $PDF"
+    runtime_err "markitdown (via uv) failed for: $PDF"
   fi
 
   if [ ! -s "$tmp_text" ]; then
