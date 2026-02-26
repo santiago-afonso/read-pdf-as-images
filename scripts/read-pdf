@@ -6,6 +6,7 @@ set -euo pipefail
 # - Read PDFs as markdown text via markitdown (fast default) or pymupdf4llm (precise, slow), wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
 # - Emit raw markdown output only (--as-raw-text).
 # - Render pages to images (--as-images) and emit a JSONL manifest to stderr.
+# - Estimate image token usage without rendering (--as-images-estimate-only).
 
 VERSION="0.1.3"
 TOOL_NAME="read-pdf"
@@ -41,6 +42,7 @@ Usage:
   ${TOOL_NAME} <pdf> --as-raw-text
   ${TOOL_NAME} <pdf> [mode flags...] [--max-output-tokens 16384]
   ${TOOL_NAME} <pdf> --as-images [--pages "1,3,7-12"] [--dpi 220] [--format png|jpeg] [--outdir DIR]
+  ${TOOL_NAME} <pdf> --as-images-estimate-only [--pages "1,3,7-12"] [--dpi 220]
   ${TOOL_NAME} --prime-cache
   ${TOOL_NAME} --help | -h
   ${TOOL_NAME} --version | -V
@@ -67,6 +69,8 @@ Modes:
                           ~50 words of context before and after each match (best-effort; extraction/layout may affect matches).
   --as-raw-text           Emit only the raw markdown output (no pseudo-XML).
   --as-images             Render pages to images (Poppler) and emit JSONL to stderr (one line per page).
+  --as-images-estimate-only  Estimate image token usage using page sizes + DPI without rendering image files.
+                             Alias: --as-images-estimate.
   --max-output-tokens N  Cap stdout text output at N tokens (estimated with tiktoken). Default: 16384.
                          Applies to all text stdout modes (including --search/--toc-pages/--table-pages/--chart-pages).
                          Set N=0 to disable truncation.
@@ -75,11 +79,11 @@ Optional metadata flags (text mode only):
   --page-structure        Include per-page flags/counts in <pdf-metadata> (has_text, word_count, image_count, table_count).
   --doc-structure         Include doc-level structure in <pdf-metadata> (bookmarks + internal/external link list).
 
-Image options (with --as-images):
+Image options (with --as-images and --as-images-estimate-only):
   --pages "1,3,7-12"      Comma/range list of 1-based pages. Defaults to all pages.
-  --dpi 220               Rendering DPI (passed to pdftoppm). Default: 220.
-  --format png|jpeg       Output image format. Default: png. Note: jpeg output files use the .jpg extension.
-  --outdir DIR            Output directory. Default: tmp/pdf_renders/<pdf-basename-no-ext>/
+  --dpi 220               Target DPI used for rendering/estimation. Default: 220.
+  --format png|jpeg       Output image format (render mode only). Default: png. Note: jpeg output files use the .jpg extension.
+  --outdir DIR            Output directory (render mode only). Default: tmp/pdf_renders/<pdf-basename-no-ext>/
 
 Exit codes:
   0  success
@@ -103,7 +107,8 @@ ${script_target_line}  - Note: if you installed via 'make install', re-run it af
     - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
   - Search/page listing engine: PyMuPDF via 'uv run --with pymupdf python scripts/read_pdf_search.py' and '.../read_pdf_page_candidates.py'
   - Image engine: pdfinfo + pdftoppm (Poppler)
-  - JSONL: in --as-images mode, one line per page is written to stderr. Stdout prints token-estimate totals/averages for gpt-5 and Gemini 3 image inputs.
+  - JSONL: in --as-images mode, one line per page is written to stderr. --as-images-estimate-only emits no image JSONL.
+  - Token estimates: both image modes print gpt-5 and Gemini 3 image-input token totals/averages to stdout.
 USAGE
 }
 
@@ -222,7 +227,7 @@ PDF_SIZE_KB=0
 PDF_PAGE_W_PTS=""
 PDF_PAGE_H_PTS=""
 
-MODE="text"        # text | raw | images
+MODE="text"        # text | raw | images | images-estimate
 TEXT_ENGINE="markitdown"  # markitdown | pymupdf4llm (text mode only)
 PAGE_STRUCTURE=false
 DOC_STRUCTURE=false
@@ -977,6 +982,34 @@ image_dimensions_px() {
   printf '%s\n' "$dims"
 }
 
+page_dimensions_px_for_page() {
+  local page=$1
+  local dpi=$2
+  local info=""
+  local dims=""
+  local wpts=""
+  local hpts=""
+
+  info=$(pdfinfo -f "$page" -l "$page" "$PDF" 2>/dev/null || true)
+  if [ -n "$info" ]; then
+    dims=$(printf '%s\n' "$info" | sed -nE 's/^Page[[:space:]]+[0-9]+[[:space:]]+size:[[:space:]]*([0-9.]+)[[:space:]]+x[[:space:]]+([0-9.]+)[[:space:]]+pts.*/\1 \2/p' | head -n1)
+    if [ -z "$dims" ]; then
+      dims=$(printf '%s\n' "$info" | sed -nE 's/^Page size:[[:space:]]*([0-9.]+)[[:space:]]+x[[:space:]]+([0-9.]+)[[:space:]]+pts.*/\1 \2/p' | head -n1)
+    fi
+  fi
+
+  if [ -n "$dims" ]; then
+    read -r wpts hpts <<<"$dims"
+  elif [[ "${PDF_PAGE_W_PTS:-}" =~ ^[0-9]+([.][0-9]+)?$ ]] && [[ "${PDF_PAGE_H_PTS:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    wpts="$PDF_PAGE_W_PTS"
+    hpts="$PDF_PAGE_H_PTS"
+  else
+    return 1
+  fi
+
+  awk -v wpts="$wpts" -v hpts="$hpts" -v dpi="$dpi" 'BEGIN { w=(wpts/72.0)*dpi; h=(hpts/72.0)*dpi; printf "%d %d\n", int(w+0.5), int(h+0.5) }'
+}
+
 estimate_tokens_gpt5_high_detail() {
   local w=$1
   local h=$2
@@ -1156,6 +1189,70 @@ images_mode() {
     "$gemini_tokens_per_image"
 }
 
+images_estimate_only_mode() {
+  CONVERSION_ENGINE="pdfinfo-estimate"
+
+  [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
+
+  need_cmd pdfinfo
+
+  gather_pdf_info "$PDF"
+
+  local -a pages=()
+  if [ -n "$PAGES_SPEC" ]; then
+    mapfile -t pages < <(parse_pages "$PAGES_SPEC")
+  else
+    local i
+    for (( i=1; i<=PDF_PAGES; i++ )); do pages+=("$i"); done
+  fi
+
+  if ((${#pages[@]}==0)); then
+    err "No pages selected"
+    usage >&2
+    exit 2
+  fi
+
+  local p
+  for p in "${pages[@]}"; do
+    if (( p<1 || p>PDF_PAGES )); then
+      err "Page out of bounds: $p (1..$PDF_PAGES)"
+      usage >&2
+      exit 2
+    fi
+  done
+
+  local total_gpt5=0
+  local pages_estimated=0
+
+  for p in "${pages[@]}"; do
+    local w h
+    if ! read -r w h < <(page_dimensions_px_for_page "$p" "$DPI"); then
+      runtime_err "Could not determine page dimensions for: $PDF (page=$p)"
+    fi
+
+    local gpt5_tokens
+    gpt5_tokens=$(estimate_tokens_gpt5_high_detail "$w" "$h")
+
+    total_gpt5=$(( total_gpt5 + gpt5_tokens ))
+    pages_estimated=$(( pages_estimated + 1 ))
+  done
+
+  local avg_gpt5
+  avg_gpt5=$(awk -v t="$total_gpt5" -v n="$pages_estimated" 'BEGIN{ if(n<=0){printf "0"} else {printf "%.2f", t/n} }')
+
+  local gemini_resolution gemini_tokens_per_image
+  read -r gemini_resolution gemini_tokens_per_image < <(gemini3_image_tokens_for_dpi "$DPI")
+  local gemini_total=$(( pages_estimated * gemini_tokens_per_image ))
+
+  printf 'Token estimate (images only, estimate-only): gpt-5(detail=high) total=%d avg_per_page=%s; gemini-3*(%s, derived_from_dpi=%d) total=%d avg_per_page=%d\n' \
+    "$total_gpt5" \
+    "$avg_gpt5" \
+    "$gemini_resolution" \
+    "$DPI" \
+    "$gemini_total" \
+    "$gemini_tokens_per_image"
+}
+
 parse_args() {
   if (( $#==0 )); then
     usage >&2
@@ -1230,6 +1327,15 @@ parse_args() {
         MODE="images"
         shift
         ;;
+      --as-images-estimate-only|--as-images-estimate)
+        if [ "$MODE" != "text" ]; then
+          err "Only one mode may be specified"
+          usage >&2
+          exit 2
+        fi
+        MODE="images-estimate"
+        shift
+        ;;
       --toc)
         if [ "$MODE" != "text" ]; then
           err "Only one mode may be specified"
@@ -1291,8 +1397,8 @@ parse_args() {
         shift
         ;;
       --pages)
-        if [ "$MODE" != "images" ]; then
-          err "--pages is only valid with --as-images"
+        if [ "$MODE" != "images" ] && [ "$MODE" != "images-estimate" ]; then
+          err "--pages is only valid with --as-images or --as-images-estimate-only"
           usage >&2
           exit 2
         fi
@@ -1301,8 +1407,8 @@ parse_args() {
         shift
         ;;
       --dpi)
-        if [ "$MODE" != "images" ]; then
-          err "--dpi is only valid with --as-images"
+        if [ "$MODE" != "images" ] && [ "$MODE" != "images-estimate" ]; then
+          err "--dpi is only valid with --as-images or --as-images-estimate-only"
           usage >&2
           exit 2
         fi
@@ -1386,6 +1492,7 @@ main() {
     toc) toc_mode >"$tmp_stdout" ;;
     raw) raw_text_mode >"$tmp_stdout" ;;
     images) images_mode >"$tmp_stdout" ;;
+    images-estimate) images_estimate_only_mode >"$tmp_stdout" ;;
     toc-pages) toc_pages_mode >"$tmp_stdout" ;;
     table-pages) table_pages_mode >"$tmp_stdout" ;;
     chart-pages) chart_pages_mode >"$tmp_stdout" ;;
