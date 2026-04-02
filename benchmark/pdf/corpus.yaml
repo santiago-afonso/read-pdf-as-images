@@ -1,0 +1,39 @@
+version: 1
+
+defaults:
+  artifact_root: /home/santi/read-pdf-as-images/tmp/benchmark/pdf
+  rubric_path: /home/santi/read-pdf-as-images/benchmark/pdf/rubric.md
+  grade_model: gpt-5.4-mini
+  hybrid_host: 127.0.0.1
+  hybrid_port: 5002
+  engines:
+    - markitdown
+    - pymupdf4llm
+    - docling
+    - kreuzberg
+    - opendataloader
+    - opendataloader_hybrid_auto
+    - markit
+
+documents:
+  - id: gfsm_manual
+    label: IMF GFSM 2014 Manual
+    source: fixed
+    path: /home/santi/machine-setup/.agents/skills/imf-gfs-manual/references/gfsm2014.pdf
+
+  - id: article_iv_auto
+    label: IMF Article IV auto-selected
+    source: imf_article_iv_auto
+    repo_path: /home/santi/imf-article-ivs
+    from_date: 2024-01-01
+    crawl_page_size: 50
+    crawl_max_pages: 6
+    candidate_count: 20
+    countries_only: true
+    article_iv_only: true
+    skip_unknown_iso3: true
+    english_only: true
+    selection_rule: largest_page_count
+    tie_breakers:
+      - newest_year_in_filename
+      - lexicographic_path

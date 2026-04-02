@@ -3,7 +3,7 @@ set -euo pipefail
 
 # read-pdf
 # Unified CLI to:
-# - Read PDFs as markdown text via markitdown (fast default) or pymupdf4llm (precise, slow), wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
+# - Read PDFs as markdown text via pdf_to_markdown (fast default) or pymupdf4llm (precise, slow), wrapped in <pdf-metadata> and <pdf-text> pseudo-XML.
 # - Emit raw markdown output only (--as-raw-text).
 # - Render pages to images (--as-images) and emit a JSONL manifest to stderr.
 # - Estimate image token usage without rendering (--as-images-estimate-only).
@@ -17,6 +17,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # - Default: online (READ_PDF_UV_OFFLINE=0) so missing deps can be fetched.
 # - To force offline (fail-fast, no network), set READ_PDF_UV_OFFLINE=1.
 READ_PDF_UV_OFFLINE="${READ_PDF_UV_OFFLINE:-0}"
+PDF_TO_MARKDOWN_BINARY="${PDF_TO_MARKDOWN_BINARY:-}"
+PDF_TO_MARKDOWN_INSTALL_HINT="Install via: curl -fsSL https://raw.githubusercontent.com/PSPDFKit/pdf-to-markdown/main/install.sh | sh and then run 'pdf-to-markdown --help' once to fetch the local binary, or set PDF_TO_MARKDOWN_BINARY to an already-extracted Nutrient binary."
 
 usage() {
   local script_target=""
@@ -48,9 +50,10 @@ Usage:
   ${TOOL_NAME} --version | -V
 
 Modes:
-  (default) / --as-text-fast  Convert the PDF with markitdown (fast) and emit:
+  (default) / --as-text-fast  Convert the PDF with pdf_to_markdown (fast) and emit:
                               - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
-                              - <pdf-text> containing markdown output (with a page-count header and PAGE markers).
+                              - <pdf-text> containing markdown output. This fast lane is whole-document markdown;
+                                explicit PAGE markers are not guaranteed.
                               Alias: --as-text
   --as-text-precise-layout-slow  Convert the PDF with pymupdf4llm (layout-aware, can be very slow) and emit:
                                  - <pdf-metadata> with file identity, tool/conversion info, layout guesses.
@@ -92,6 +95,8 @@ Exit codes:
 
 Dependency notes:
   - Python deps are fetched on demand via uv.
+  - Fast text mode also requires a local Nutrient pdf-to-markdown binary. Runtime does not auto-download it.
+    ${PDF_TO_MARKDOWN_INSTALL_HINT}
   - Default behavior is online. To force offline behavior (no network), set:
       READ_PDF_UV_OFFLINE=1
   - To prefetch and warm the cache once (recommended for restricted environments),
@@ -103,7 +108,7 @@ Operational context:
   - Script path: ${BASH_SOURCE[0]}
 ${script_target_line}  - Note: if you installed via 'make install', re-run it after pulling updates (the install target copies files into PREFIX/bin).
   - Text engines:
-    - markitdown[pdf] (fast default) via 'uv run --with markitdown[pdf] python scripts/read_pdf_text.py --engine markitdown'
+    - pdf_to_markdown (fast default, whole-document) via 'uv run --with pypdf python scripts/read_pdf_text.py --engine pdf_to_markdown'
     - pymupdf4llm (precise layout, slow) via 'uv run --with pymupdf4llm python scripts/read_pdf_text.py --engine pymupdf4llm'
   - Search/page listing engine: PyMuPDF via 'uv run --with pymupdf python scripts/read_pdf_search.py' and '.../read_pdf_page_candidates.py'
   - Image engine: pdfinfo + pdftoppm (Poppler)
@@ -212,6 +217,48 @@ ensure_helper() {
   fi
 }
 
+expected_pdf_to_markdown_binary_name() {
+  local system arch
+  system=$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+  case "${system}:${arch}" in
+    linux:x86_64|linux:amd64)
+      printf '%s' "nutrient-linux-amd64"
+      ;;
+    linux:aarch64|linux:arm64)
+      printf '%s' "nutrient-linux-arm64"
+      ;;
+    darwin:arm64)
+      printf '%s' "nutrient-darwin-arm64"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_pdf_to_markdown_runtime() {
+  if [ -n "${PDF_TO_MARKDOWN_BINARY:-}" ]; then
+    if [ ! -f "${PDF_TO_MARKDOWN_BINARY}" ]; then
+      runtime_err "PDF_TO_MARKDOWN_BINARY does not exist: ${PDF_TO_MARKDOWN_BINARY}. ${PDF_TO_MARKDOWN_INSTALL_HINT}"
+    fi
+    printf '%s' "${PDF_TO_MARKDOWN_BINARY}"
+    return 0
+  fi
+
+  local binary_name binary_path
+  if binary_name=$(expected_pdf_to_markdown_binary_name); then
+    binary_path="${HOME}/.local/share/nutrient/cli/${binary_name}"
+    if [ -f "${binary_path}" ]; then
+      printf '%s' "${binary_path}"
+      return 0
+    fi
+  fi
+
+  runtime_err "Unable to find a bootstrapped pdf_to_markdown runtime binary. ${PDF_TO_MARKDOWN_INSTALL_HINT}"
+}
+
 # Globals for parsed PDF info (text and images modes)
 PDF=""
 PDF_PATH=""
@@ -228,7 +275,7 @@ PDF_PAGE_W_PTS=""
 PDF_PAGE_H_PTS=""
 
 MODE="text"        # text | raw | images | images-estimate
-TEXT_ENGINE="markitdown"  # markitdown | pymupdf4llm (text mode only)
+TEXT_ENGINE="pdf_to_markdown"  # pdf_to_markdown | pymupdf4llm (text mode only)
 PAGE_STRUCTURE=false
 DOC_STRUCTURE=false
 TOC_MAX_PAGES=5
@@ -413,8 +460,13 @@ emit_text_block() {
     "$(xml_escape "$char_count")" \
     "$extra_attrs"
   printf '<![CDATA[\n'
-  printf '<!-- ORIGINAL_PAGES=%s; page boundaries are marked with \"<!-- PAGE n -->\" comments inserted by read_pdf_text.py. -->\n' \
-    "$PDF_PAGES"
+  if [ "$MODE" = "toc" ] || [ "$CONVERSION_ENGINE" = "pymupdf4llm" ]; then
+    printf '<!-- ORIGINAL_PAGES=%s; page boundaries are marked with \"<!-- PAGE n -->\" comments inserted by read_pdf_text.py. -->\n' \
+      "$PDF_PAGES"
+  else
+    printf '<!-- ORIGINAL_PAGES=%s; fast whole-document markdown conversion via pdf_to_markdown; explicit PAGE markers are not guaranteed in this output. -->\n' \
+      "$PDF_PAGES"
+  fi
   if [ "$MODE" = "toc" ]; then
     printf '<!-- TOC_EXTRACTION_BEST_EFFORT=true; matched_pages=%s; max_pages=%s; may miss TOC/Index pages, including ones not matched by regex/heuristics. -->\n' \
       "$TOC_MATCHED_PAGES" \
@@ -534,19 +586,17 @@ PY
   local tmp_text="${tmpdir}/text.md"
   local tmp_err="${tmpdir}/text.stderr"
 
-  if [ "$TEXT_ENGINE" = "markitdown" ]; then
-    # markitdown/pdfminer can emit noisy diagnostics (often benign) to stderr.
-    # Keep stdout clean (pseudo-XML only) by capturing stderr and only surfacing
-    # it if the conversion fails.
-    if ! uv_run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
-      --engine markitdown \
+  if [ "$TEXT_ENGINE" = "pdf_to_markdown" ]; then
+    resolve_pdf_to_markdown_runtime >/dev/null
+    if ! uv_run --with pypdf python "${READ_PDF_TEXT_SCRIPT}" \
+      --engine pdf_to_markdown \
       --expected-pages "$PDF_PAGES" \
       "$PDF" >"$tmp_text" 2>"$tmp_err"; then
       if [ -s "$tmp_err" ]; then
-        echo "Underlying engine stderr (markitdown):" >&2
+        echo "Underlying engine stderr (pdf_to_markdown):" >&2
         cat "$tmp_err" >&2
       fi
-      runtime_err "markitdown (via uv) failed for: $PDF"
+      runtime_err "pdf_to_markdown failed for: $PDF"
     fi
   else
     if ! uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" \
@@ -565,7 +615,7 @@ PY
 }
 
 toc_mode() {
-  CONVERSION_ENGINE="markitdown"
+  CONVERSION_ENGINE="pdf_to_markdown"
   MODE="toc"
 
   [ -f "$PDF" ] || runtime_err "PDF not found: $PDF"
@@ -659,6 +709,7 @@ PY
   fi
 
   ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
+  resolve_pdf_to_markdown_runtime >/dev/null
 
   local tmpdir
   tmpdir=$(mktemp -d -t read-pdf-toc.XXXXXX)
@@ -666,8 +717,8 @@ PY
   local tmp_meta="${tmpdir}/toc_meta.json"
 
   local code=0
-  if uv_run --with 'markitdown[pdf]' python "${READ_PDF_TEXT_SCRIPT}" \
-    --engine markitdown \
+  if uv_run --with pypdf python "${READ_PDF_TEXT_SCRIPT}" \
+    --engine pdf_to_markdown \
     --filter toc \
     --toc-max-pages "$TOC_MAX_PAGES" \
     --meta-json-out "$tmp_meta" \
@@ -689,7 +740,7 @@ Next steps:
 MSG
       return 0
     fi
-    runtime_err "markitdown (via uv) failed for: $PDF"
+    runtime_err "pdf_to_markdown failed for: $PDF"
   fi
 
   if [ ! -s "$tmp_text" ]; then
@@ -770,7 +821,7 @@ raw_text_mode() {
   need_cmd uv
   ensure_helper "$READ_PDF_TEXT_SCRIPT" "read_pdf_text.py"
 
-  if ! uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" "$PDF"; then
+  if ! uv_run --with pymupdf4llm python "${READ_PDF_TEXT_SCRIPT}" --engine pymupdf4llm "$PDF"; then
     runtime_err "pymupdf4llm (via uv) failed for: $PDF"
   fi
 }
@@ -785,19 +836,21 @@ prime_cache_mode() {
   cache_dir=$(resolve_uv_cache_dir)
 
   echo "Priming uv cache for ${TOOL_NAME} (cache_dir=${cache_dir})..." >&2
-  echo "  - markitdown[pdf]" >&2
+  echo "  - pdf_to_markdown runtime check" >&2
+  echo "  - pypdf" >&2
   echo "  - pymupdf" >&2
   echo "  - pymupdf4llm" >&2
 
   local old_offline="$READ_PDF_UV_OFFLINE"
   READ_PDF_UV_OFFLINE=0
 
-  # Warm each optional engine explicitly so later offline/restricted runs don't need network.
-  uv_run --with 'markitdown[pdf]' python - <<'PY'
-from markitdown import MarkItDown
+  local runtime_binary
+  runtime_binary=$(resolve_pdf_to_markdown_runtime)
+  printf 'ok: pdf_to_markdown (%s)\n' "$runtime_binary"
+  uv_run --with pypdf python - <<'PY'
+from pypdf import PdfReader
 
-_ = MarkItDown()
-print("ok: markitdown")
+print("ok: pypdf")
 PY
   uv_run --with pymupdf python - <<'PY'
 import fitz
@@ -1286,7 +1339,7 @@ parse_args() {
           exit 2
         fi
         MODE="text"
-        TEXT_ENGINE="markitdown"
+        TEXT_ENGINE="pdf_to_markdown"
         shift
         ;;
       --as-text-fast)
@@ -1296,7 +1349,7 @@ parse_args() {
           exit 2
         fi
         MODE="text"
-        TEXT_ENGINE="markitdown"
+        TEXT_ENGINE="pdf_to_markdown"
         shift
         ;;
       --as-text-precise-layout-slow)

@@ -9,6 +9,7 @@ tmp/
 # python artifacts
 __pycache__/
 *.pyc
+.kreuzberg/
 
 # legacy Codex TODO/PRD scratch (bd is canonical)
 CODEX.TODO*.md

@@ -1,23 +1,24 @@
 # read-pdf
 
-Unified CLI to read PDFs either as text (default: `markitdown[pdf]`, optional: `pymupdf4llm`) or as images (via Poppler), optimized for use by Codex/CLI coding agents.
+Unified CLI to read PDFs either as text (default: `pdf_to_markdown`, optional: `pymupdf4llm`) or as images (via Poppler), optimized for use by Codex/CLI coding agents.
 
 Why: Codex/CLI agents need deterministic file paths to attach images *and* a robust way to ingest PDF text while being aware of conversion caveats. This tool wraps Poppler utilities for image rendering and provides two text conversion engines (fast default + precise fallback), emitting machine-friendly metadata to help agents reason about the document.
 
 ## Features
 - Text mode (default / `--as-text-fast`, alias: `--as-text`):
-  - Uses `markitdown[pdf]` (via `uv run --with markitdown[pdf]`) to convert the PDF into markdown.
+  - Uses a local Nutrient `pdf_to_markdown` binary (invoked through `read_pdf_text.py`) to convert the PDF into markdown.
   - Emits `<pdf-metadata>` with file identity, conversion/tool info, layout-type guesses, and page count.
   - Emits `<pdf-text>` wrapping the markdown output, with:
-    - a header comment summarizing original page count,
-    - explicit `<!-- PAGE n -->` markers inserted before each page chunk, and
+    - a header comment summarizing original page count, and
     - optional `<page-structure>` / `<doc-structure>` blocks when requested.
+  - This fast lane is whole-document markdown; explicit `<!-- PAGE n -->` markers are not guaranteed.
 - Precise (slow) text mode (`--as-text-precise-layout-slow`):
   - Uses `pymupdf4llm.to_markdown(...)` (via `uv run --with pymupdf4llm`) to convert the PDF into markdown.
-  - Can be significantly slower than markitdown on some PDFs; use when layout-aware extraction is worth the cost.
+  - Can be significantly slower than the fast default engine on some PDFs; use when layout-aware extraction is worth the cost.
 - TOC/index extraction (`--toc`, best-effort):
   - Emits the same pseudo-XML wrapper as text mode (`<pdf-metadata>` + `<pdf-text>`), but with `<pdf-text>` containing only pages that look like a Table of Contents / Índice / Index / List of Figures / etc.
   - Uses regex + simple structural heuristics (e.g., headings plus lines ending with page numbers / dot leaders). This can miss real TOC pages.
+  - Preserves explicit `<!-- PAGE n -->` markers by converting one page at a time through `pdf_to_markdown` before applying the heuristics.
   - Caps output to 5 pages.
   - If no matches are found, prints plain guidance text (no pseudo-XML) so agents can fall back to full text or image rendering.
 - Raw text mode (`--as-raw-text`):
@@ -44,8 +45,21 @@ Why: Codex/CLI agents need deterministic file paths to attach images *and* a rob
 Dependencies:
 - Poppler (`pdftoppm`, `pdfinfo`) for image rendering and PDF metadata.
 - `uv` for Python execution and dependency management.
-- `markitdown[pdf]` for fast PDF → markdown/text conversion (fetched on demand via `uv run --with markitdown[pdf]`, no persistent virtualenv required).
+- A local Nutrient `pdf_to_markdown` binary for fast PDF → markdown/text conversion.
 - `pymupdf4llm` (plus PyMuPDF) for the precise (slow) text mode and optional structural scans (fetched on demand via `uv run --with pymupdf4llm`).
+
+Bootstrap the fast default engine once:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PSPDFKit/pdf-to-markdown/main/install.sh | sh
+pdf-to-markdown --help
+```
+
+`read-pdf` does not auto-download the Nutrient binary at runtime. If you keep the binary somewhere else, set:
+
+```bash
+export PDF_TO_MARKDOWN_BINARY=/abs/path/to/nutrient-binary
+```
 
 On Ubuntu/Debian, for Poppler:
 `sudo apt-get install -y poppler-utils`.
@@ -57,7 +71,7 @@ make install
 # ensure ~/.local/bin is on your PATH
 ```
 
-By default, `make install` also primes the `uv` cache (downloads `markitdown[pdf]`, `pymupdf`, `pymupdf4llm`) so later runs in restricted/offline environments don’t need network. To skip priming:
+By default, `make install` also primes the local runtime checks and `uv` cache (`pypdf`, `pymupdf`, `pymupdf4llm`) so later runs in restricted/offline environments don’t need network. To skip priming:
 
 ```
 make install PRIME_CACHE=0
@@ -117,7 +131,7 @@ read-pdf "Input/Classifiers/FY25 Theme Taxonomy. Mar 2025.pdf"
 ```
 This prints:
 - `<pdf-metadata>...</pdf-metadata>` with file identity, conversion/tool info, and layout-type guesses.
-- `<pdf-text>...</pdf-text>` wrapping the markdown output, including a header comment about original page count and `<!-- PAGE n -->` markers.
+- `<pdf-text>...</pdf-text>` wrapping the markdown output, including a header comment about original page count. In the default fast lane, explicit `<!-- PAGE n -->` markers are not guaranteed.
 - Optional `<page-structure>` and `<doc-structure>` blocks when `--page-structure` / `--doc-structure` are supplied, including per-page stats plus bookmarks/links.
 
 ## Exit Codes
@@ -129,6 +143,42 @@ This prints:
 - `read-pdf-as-images` remains as a thin, deprecated wrapper that delegates to `read-pdf --as-images` for backward compatibility.
 - Image mode generates images only; it does not perform OCR or text extraction.
 - Page range parsing accepts lists and ranges, e.g., `1,3,7-12`.
-- Default text mode relies on `markitdown[pdf]`; `read-pdf` uses `uv run --with markitdown[pdf]` under the hood, so you only need `uv` installed and network access the first time to fetch the package (subsequent runs will use the cached environment).
+- Default text mode relies on a local Nutrient `pdf_to_markdown` binary. If `read-pdf` cannot find it, it fails fast with the exact bootstrap hint instead of auto-downloading anything.
 - Precise (slow) text mode relies on `pymupdf4llm`; use `--as-text-precise-layout-slow` when you need layout-aware extraction and can tolerate higher runtime.
 - To force offline behavior (no network attempts), set `READ_PDF_UV_OFFLINE=1`.
+
+## Benchmarking Backends
+
+The repo now includes a reusable CPU-only benchmark harness under `benchmark/pdf/` for comparing local PDF-to-markdown backends on a small pilot corpus.
+
+Files:
+- `benchmark/pdf/corpus.yaml` pins the pilot corpus and engine matrix defaults.
+- `benchmark/pdf/rubric.md` pins the grading rubric used by `gpt-5.4-mini` subagents.
+- `benchmark/pdf/benchmark.py` prepares the corpus, runs conversions, writes timings/artifacts, and emits grading bundles plus a placeholder `grades.json` schema when subagent grading has not been imported yet.
+- `benchmark/pdf/chart_speed_vs_table_accuracy.py` builds a scatter chart from benchmark `timings.csv` and completed grade payloads.
+
+Examples:
+
+```bash
+uv run benchmark/pdf/benchmark.py prepare-corpus
+uv run benchmark/pdf/benchmark.py run
+uv run benchmark/pdf/benchmark.py run --resolved-corpus path/to/corpus-resolved.json --quality-targets-file path/to/quality-targets.json
+uv run benchmark/pdf/chart_speed_vs_table_accuracy.py --timings-csv path/to/timings.csv --grades-json path/to/grades.json --output-svg path/to/chart.svg
+```
+
+Run artifacts are written to `tmp/benchmark/pdf/<run_id>/` and include:
+- `corpus-resolved.json`
+- `conversions/`
+- `excerpts/`
+- `versions.json`
+- `timings.csv`
+- `grading/`
+- `grades.json`
+- `summary.md`
+
+If `--quality-targets-file` is provided, quality grading is constrained to explicit spot-check targets:
+- full-document conversions are still used for speed measurement
+- the grading bundles include only target-local source-page images plus the small excerpt markdown outputs for each engine
+- the subagent is instructed not to read any full original PDF or full-document markdown output
+
+The benchmark harness also supports `pdf_to_markdown`. Its upstream wrapper downloads a signed proprietary Nutrient binary from the vendor CDN, so it does not have the same pure-local install/update profile as the Python-first engines.

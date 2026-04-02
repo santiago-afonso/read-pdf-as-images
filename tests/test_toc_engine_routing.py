@@ -33,7 +33,7 @@ EOF
     )
 
 
-def _install_fake_uv_enforcing_toc_markitdown(bin_dir: Path) -> None:
+def _install_fake_uv_enforcing_pdf_to_markdown_routing(bin_dir: Path) -> None:
     _write_executable(
         bin_dir / "uv",
         """#!/usr/bin/env python3
@@ -85,25 +85,28 @@ def arg_value(flag: str) -> str | None:
     return py_args[idx + 1]
 
 if target == "read_pdf_text.py":
-    if arg_value("--filter") == "toc":
-        if "markitdown[pdf]" not in with_packages:
-            sys.stderr.write("toc mode must install markitdown[pdf]\\n")
+    if arg_value("--engine") == "pdf_to_markdown":
+        if "pypdf" not in with_packages:
+            sys.stderr.write("pdf_to_markdown mode must install pypdf\\n")
             sys.exit(97)
-        if arg_value("--engine") != "markitdown":
-            sys.stderr.write("toc mode must pass --engine markitdown\\n")
-            sys.exit(98)
         meta_out = arg_value("--meta-json-out")
         if meta_out:
             Path(meta_out).write_text(
                 json.dumps({"full_char_count": 200, "selected_pages": [1]}, ensure_ascii=False),
                 encoding="utf-8",
             )
-        sys.stdout.write("<!-- PAGE 1 -->\\n## Table of Contents\\n")
+        if arg_value("--filter") == "toc":
+            sys.stdout.write("<!-- PAGE 1 -->\\n## Table of Contents\\n")
+        else:
+            sys.stdout.write("# Full Text\\n")
         sys.exit(0)
 
-    # Allow other modes to proceed in case the CLI behavior changes.
-    sys.stdout.write("<!-- PAGE 1 -->\\n# Non-TOC\\n")
-    sys.exit(0)
+    if arg_value("--engine") == "pymupdf4llm":
+        sys.stdout.write("<!-- PAGE 1 -->\\n# Precise Text\\n")
+        sys.exit(0)
+
+    sys.stderr.write("unexpected read_pdf_text.py engine\\n")
+    sys.exit(98)
 
 if target == "truncate_text_output.py":
     os.execvp("python3", ["python3"] + py_args)
@@ -117,17 +120,42 @@ sys.exit(94)
     )
 
 
-def test_toc_routes_to_markitdown_engine(tmp_path: Path) -> None:
+def _install_fake_pdf_to_markdown_runtime(bin_dir: Path) -> Path:
+    runtime = bin_dir / "nutrient-linux-amd64"
+    _write_executable(
+        runtime,
+        """#!/usr/bin/env bash
+set -euo pipefail
+echo "unused fake runtime"
+""",
+    )
+    return runtime
+
+
+def _install_noop_uv(bin_dir: Path) -> None:
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -euo pipefail
+echo "noop uv should not be called" >&2
+exit 99
+""",
+    )
+
+
+def test_toc_routes_to_pdf_to_markdown_engine(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _install_fake_pdfinfo(fake_bin)
-    _install_fake_uv_enforcing_toc_markitdown(fake_bin)
+    _install_fake_uv_enforcing_pdf_to_markdown_routing(fake_bin)
+    fake_runtime = _install_fake_pdf_to_markdown_runtime(fake_bin)
 
     fake_pdf = tmp_path / "fake.pdf"
     fake_pdf.write_bytes(b"%PDF-1.7\\n%fake\\n")
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["PDF_TO_MARKDOWN_BINARY"] = str(fake_runtime)
     result = subprocess.run(
         [str(READ_PDF), str(fake_pdf), "--toc", "--max-output-tokens", "0"],
         cwd=REPO_ROOT,
@@ -139,5 +167,59 @@ def test_toc_routes_to_markitdown_engine(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert 'mode="toc"' in result.stdout
-    assert 'engine="markitdown"' in result.stdout
+    assert 'engine="pdf_to_markdown"' in result.stdout
     assert "## Table of Contents" in result.stdout
+
+
+def test_default_fast_text_routes_to_pdf_to_markdown_engine(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _install_fake_pdfinfo(fake_bin)
+    _install_fake_uv_enforcing_pdf_to_markdown_routing(fake_bin)
+    fake_runtime = _install_fake_pdf_to_markdown_runtime(fake_bin)
+
+    fake_pdf = tmp_path / "fake.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.7\\n%fake\\n")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["PDF_TO_MARKDOWN_BINARY"] = str(fake_runtime)
+    result = subprocess.run(
+        [str(READ_PDF), str(fake_pdf), "--max-output-tokens", "0"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'engine="pdf_to_markdown"' in result.stdout
+    assert 'source="pdf_to_markdown"' in result.stdout
+    assert "explicit PAGE markers are not guaranteed" in result.stdout
+
+
+def test_default_fast_text_fails_fast_when_pdf_to_markdown_binary_is_missing(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _install_fake_pdfinfo(fake_bin)
+    _install_noop_uv(fake_bin)
+
+    fake_pdf = tmp_path / "fake.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.7\\n%fake\\n")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["PDF_TO_MARKDOWN_BINARY"] = str(tmp_path / "missing-nutrient")
+    result = subprocess.run(
+        [str(READ_PDF), str(fake_pdf), "--max-output-tokens", "0"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "PDF_TO_MARKDOWN_BINARY does not exist" in result.stderr
+    assert "pdf-to-markdown --help" in result.stderr

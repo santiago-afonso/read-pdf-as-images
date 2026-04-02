@@ -4,11 +4,25 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
+import platform
 import re
+import subprocess
 import sys
+import tempfile
 import unicodedata
 from contextlib import redirect_stdout
 from pathlib import Path
+
+from pypdf import PdfReader, PdfWriter
+
+
+PDF_TO_MARKDOWN_INSTALL_HINT = (
+    "Install via: curl -fsSL "
+    "https://raw.githubusercontent.com/PSPDFKit/pdf-to-markdown/main/install.sh | sh "
+    "and then run `pdf-to-markdown --help` once to fetch the local binary, "
+    "or set PDF_TO_MARKDOWN_BINARY to an already-extracted Nutrient binary."
+)
 
 
 def _strip_accents(text: str) -> str:
@@ -24,6 +38,58 @@ def _norm(text: str) -> str:
 
 def _collapse_ws(text: str) -> str:
     return " ".join(text.split())
+
+
+def expected_pdf_to_markdown_binary_name() -> str | None:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "linux" and machine in {"x86_64", "amd64"}:
+        return "nutrient-linux-amd64"
+    if system == "linux" and machine in {"aarch64", "arm64"}:
+        return "nutrient-linux-arm64"
+    if system == "darwin" and machine == "arm64":
+        return "nutrient-darwin-arm64"
+    return None
+
+
+def resolve_pdf_to_markdown_executable() -> str:
+    override = os.environ.get("PDF_TO_MARKDOWN_BINARY")
+    if override:
+        override_path = Path(override).expanduser().resolve()
+        if not override_path.is_file():
+            raise FileNotFoundError(
+                f"PDF_TO_MARKDOWN_BINARY does not exist: {override_path}. {PDF_TO_MARKDOWN_INSTALL_HINT}"
+            )
+        return str(override_path)
+
+    binary_name = expected_pdf_to_markdown_binary_name()
+    if binary_name:
+        binary_path = Path.home() / ".local" / "share" / "nutrient" / "cli" / binary_name
+        if binary_path.is_file():
+            return str(binary_path)
+
+    raise FileNotFoundError(
+        "Unable to find pdf-to-markdown. "
+        "Set PDF_TO_MARKDOWN_BINARY to the extracted Nutrient binary, "
+        "or install/bootstrap the local Nutrient binary first. "
+        f"{PDF_TO_MARKDOWN_INSTALL_HINT}"
+    )
+
+
+def _run_pdf_to_markdown(input_pdf: Path) -> str:
+    executable = resolve_pdf_to_markdown_executable()
+    result = subprocess.run(
+        [executable, str(input_pdf)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise RuntimeError(
+            f"pdf_to_markdown failed for {input_pdf}: {stderr or 'no stderr output captured'}"
+        )
+    return result.stdout
 
 
 _PAGE_LIST_RE = r"(?:\d{1,4}|[ivxlcdm]{1,8})(?:\s*(?:,|;|-|–|—)\s*(?:\d{1,4}|[ivxlcdm]{1,8}))*"
@@ -350,7 +416,7 @@ def _select_toc_pages(page_text_by_number: dict[int, str], toc_max_pages: int) -
 def build_markdown_with_page_markers(
     pdf_path: Path,
     *,
-    engine: str = "markitdown",
+    engine: str = "pdf_to_markdown",
     filter_mode: str = "all",
     toc_max_pages: int = 5,
     expected_pages: int | None = None,
@@ -365,6 +431,22 @@ def build_markdown_with_page_markers(
       <page 2 markdown>
       ...
     """
+    if engine == "pdf_to_markdown" and filter_mode == "all":
+        markdown = _extract_full_document_pdf_to_markdown(pdf_path)
+        selected_pages = (
+            list(range(1, expected_pages + 1)) if expected_pages is not None and expected_pages > 0 else []
+        )
+        meta: dict[str, object] = {
+            "engine": engine,
+            "filter": filter_mode,
+            "toc_max_pages": toc_max_pages,
+            "full_char_count": len(markdown),
+            "selected_pages": selected_pages,
+            "selected_char_count": len(markdown),
+            "page_markers_present": False,
+        }
+        return markdown, meta
+
     page_text_by_number: dict[int, str] = _extract_pages(
         pdf_path, engine=engine, expected_pages=expected_pages
     )
@@ -389,6 +471,7 @@ def build_markdown_with_page_markers(
         "full_char_count": sum(len(t) for t in page_text_by_number.values()),
         "selected_pages": selected_pages if selected_pages is not None else sorted(page_text_by_number.keys()),
         "selected_char_count": len(markdown),
+        "page_markers_present": True,
     }
     return markdown, meta
 
@@ -401,6 +484,8 @@ def _extract_pages(
 ) -> dict[int, str]:
     if engine == "pymupdf4llm":
         page_text_by_number = _extract_pages_pymupdf4llm(pdf_path)
+    elif engine == "pdf_to_markdown":
+        page_text_by_number = _extract_pages_pdf_to_markdown(pdf_path)
     elif engine == "markitdown":
         page_text_by_number = _extract_pages_markitdown(pdf_path)
     else:
@@ -460,6 +545,27 @@ def _extract_pages_markitdown(pdf_path: Path) -> dict[int, str]:
     return page_text_by_number
 
 
+def _extract_full_document_pdf_to_markdown(pdf_path: Path) -> str:
+    return _run_pdf_to_markdown(pdf_path)
+
+
+def _extract_pages_pdf_to_markdown(pdf_path: Path) -> dict[int, str]:
+    page_text_by_number: dict[int, str] = {}
+    with pdf_path.open("rb") as handle:
+        reader = PdfReader(handle)
+        with tempfile.TemporaryDirectory(prefix="read-pdf-pages-") as tmpdir_str:
+            tmpdir = Path(tmpdir_str)
+            for idx, page in enumerate(reader.pages, start=1):
+                writer = PdfWriter()
+                writer.add_page(page)
+                page_pdf = tmpdir / f"page-{idx:04d}.pdf"
+                with page_pdf.open("wb") as page_handle:
+                    writer.write(page_handle)
+                page_text = _run_pdf_to_markdown(page_pdf).rstrip()
+                page_text_by_number[idx] = page_text + "\n" if page_text else ""
+    return page_text_by_number
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -468,11 +574,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--engine",
-        choices=["markitdown", "pymupdf4llm"],
-        default="markitdown",
+        choices=["pdf_to_markdown", "markitdown", "pymupdf4llm"],
+        default="pdf_to_markdown",
         help=(
             "Extraction engine. "
-            "'markitdown' is faster but less layout-aware; "
+            "'pdf_to_markdown' is the fast default whole-document converter; "
+            "'markitdown' is deprecated; "
             "'pymupdf4llm' is more layout-aware but can be slow on some PDFs."
         ),
     )

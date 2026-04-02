@@ -14,10 +14,10 @@ PRIME_CACHE ?= 1
 help:
 	@echo "Targets:"
 	@echo "  install    Install CLI to $(TARGET) (and legacy wrapper to $(LEGACY_TARGET))"
-	@echo "            (default: primes uv cache; set PRIME_CACHE=0 to skip)"
+	@echo "            (default: checks fast-engine runtime + primes uv cache; set PRIME_CACHE=0 to skip)"
 	@echo "  install-dev Symlink CLI + helpers into $(BINDIR) (dev mode: no stale installs)"
 	@echo "  uninstall  Remove installed CLI"
-	@echo "  prime-cache Prefetch Python deps into uv cache"
+	@echo "  prime-cache Check pdf_to_markdown runtime + prefetch Python deps into uv cache"
 	@echo "  lint       Run shellcheck on scripts"
 	@echo "  test       Generate a tiny PDF and run an integration smoke test"
 	@echo "  help       Show this message"

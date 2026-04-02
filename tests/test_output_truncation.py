@@ -141,17 +141,31 @@ sys.exit(94)
     )
 
 
+def _install_fake_pdf_to_markdown_runtime(bin_dir: Path) -> Path:
+    runtime = bin_dir / "nutrient-linux-amd64"
+    _write_executable(
+        runtime,
+        """#!/usr/bin/env bash
+set -euo pipefail
+echo "unused fake runtime"
+""",
+    )
+    return runtime
+
+
 def _run_read_pdf(tmp_path: Path, mode_args: list[str]) -> subprocess.CompletedProcess[str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _install_fake_pdfinfo(fake_bin)
     _install_fake_uv(fake_bin)
+    fake_runtime = _install_fake_pdf_to_markdown_runtime(fake_bin)
 
     fake_pdf = tmp_path / "fake.pdf"
     fake_pdf.write_bytes(b"%PDF-1.7\\n%fake\\n")
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["PDF_TO_MARKDOWN_BINARY"] = str(fake_runtime)
     cmd = [str(READ_PDF), str(fake_pdf), *mode_args, "--max-output-tokens", "50"]
     return subprocess.run(cmd, cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
 
@@ -183,12 +197,14 @@ def test_disable_truncation_with_zero(tmp_path: Path) -> None:
     fake_bin.mkdir()
     _install_fake_pdfinfo(fake_bin)
     _install_fake_uv(fake_bin)
+    fake_runtime = _install_fake_pdf_to_markdown_runtime(fake_bin)
 
     fake_pdf = tmp_path / "fake.pdf"
     fake_pdf.write_bytes(b"%PDF-1.7\\n%fake\\n")
 
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["PDF_TO_MARKDOWN_BINARY"] = str(fake_runtime)
     result = subprocess.run(
         [str(READ_PDF), str(fake_pdf), "--as-raw-text", "--max-output-tokens", "0"],
         cwd=REPO_ROOT,
