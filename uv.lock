@@ -2,6 +2,10 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
+[options]
+exclude-newer = "2026-06-01T12:20:48.484126956Z"
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "pymupdf"
 version = "1.26.7"

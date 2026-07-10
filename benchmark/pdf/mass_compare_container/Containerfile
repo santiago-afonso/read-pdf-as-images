@@ -1,0 +1,130 @@
+FROM alpine:3.22
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_PYTHON_VERSION_WARNING=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOME=/tmp/mass-compare-home \
+    XDG_CACHE_HOME=/tmp/mass-compare-cache \
+    MPLCONFIGDIR=/tmp/mass-compare-cache/matplotlib \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_HTTP_TIMEOUT=600 \
+    CARGO_NET_RETRY=5 \
+    NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
+ARG ALPINE_REPOSITORY_URL="http://dl-cdn.alpinelinux.org/alpine"
+RUN if [ -n "$ALPINE_REPOSITORY_URL" ]; then \
+      printf '%s/v3.22/main\n%s/v3.22/community\n@edge %s/edge/main\n@edge %s/edge/community\n' "$ALPINE_REPOSITORY_URL" "$ALPINE_REPOSITORY_URL" "$ALPINE_REPOSITORY_URL" "$ALPINE_REPOSITORY_URL" > /etc/apk/repositories; \
+    fi \
+    && apk add --no-cache \
+      bash \
+      build-base \
+      ca-certificates \
+      cargo@edge \
+      cmake \
+      curl \
+      freetype-dev \
+      g++ \
+      gcc \
+      gcompat \
+      ghostscript \
+      git \
+      gfortran \
+      jpeg-dev \
+      lcms2 \
+      libc6-compat \
+      libffi-dev \
+      libheif-dev \
+      libmagic \
+      libxml2-dev \
+      libxslt-dev \
+      linux-headers \
+      musl-dev \
+      ninja \
+      nodejs \
+      npm \
+      openblas-dev \
+      openjdk17-jre \
+      openssl-dev \
+      poppler-utils \
+      py3-opencv \
+      py3-pip \
+      python3 \
+      python3-dev \
+      qpdf \
+      qpdf-dev \
+      rust@edge \
+      zlib-dev
+
+# Optional corporate/internal CA bundle. The outer CLI auto-passes this secret
+# from ~/machine-setup when present; direct builds can use:
+#   podman build --secret id=corp_ca_bundle,src=/path/to/combined-ca.pem ...
+RUN --mount=type=secret,id=corp_ca_bundle,target=/tmp/corp-ca-bundle.pem,required=false \
+    set -eux; \
+    if [ -s /tmp/corp-ca-bundle.pem ]; then \
+      cp /tmp/corp-ca-bundle.pem /usr/local/share/ca-certificates/corp-ca-bundle.crt; \
+      update-ca-certificates || true; \
+      cat /tmp/corp-ca-bundle.pem >> /etc/ssl/certs/ca-certificates.crt; \
+    fi; \
+    python3 -m venv --system-site-packages /opt/venv; \
+    /opt/venv/bin/pip install --upgrade pip setuptools wheel
+
+# Install each engine dependency independently so one Alpine/musl-incompatible
+# package does not prevent building a usable partial benchmark image. Logs live
+# in /opt/mass-compare/install-logs inside the image for diagnostics.
+RUN set -eux; \
+    mkdir -p /opt/mass-compare/install-logs; \
+    install_py() { \
+      name="$1"; shift; \
+      echo "==> installing ${name}: $*"; \
+      if /opt/venv/bin/pip install --no-cache-dir "$@" >"/opt/mass-compare/install-logs/${name}.stdout.log" 2>"/opt/mass-compare/install-logs/${name}.stderr.log"; then \
+        echo "ok ${name}"; \
+      else \
+        echo "WARNING: failed to install ${name}; engine will report a missing dependency at runtime" >&2; \
+        cat "/opt/mass-compare/install-logs/${name}.stderr.log" >&2 || true; \
+      fi; \
+    }; \
+    install_py pypdf pypdf; \
+    install_py pdfminer_six pdfminer.six; \
+    install_py pypdfium2 pypdfium2; \
+    install_py pymupdf pymupdf; \
+    install_py pymupdf4llm pymupdf4llm; \
+    install_py pdfplumber pdfplumber; \
+    install_py tabulate tabulate; \
+    install_py pandas pandas; \
+    install_py markitdown 'markitdown[pdf]'; \
+    install_py camelot 'camelot-py[base]'; \
+    install_py unstructured 'unstructured==0.18.21' pdfminer.six; \
+    install_py docling 'docling-slim[format-pdf]==2.111.0'; \
+    install_py kreuzberg 'html-to-markdown<2' 'kreuzberg==1.7.0'; \
+    install_py opendataloader opendataloader-pdf; \
+    install_py liteparse liteparse; \
+    install_py edgeparse edgeparse; \
+    install_py pdf_oxide_dash pdf-oxide; \
+    install_py pdf_oxide_underscore pdf_oxide
+
+# Optional JS and JVM comparators. These are best-effort: the runner will emit
+# actionable failures when binaries are unavailable.
+RUN set -eux; \
+    mkdir -p /opt/mass-compare/install-logs /opt/tabula; \
+    if npm install -g markit-ai@0.5.0 > /opt/mass-compare/install-logs/markit-ai.stdout.log 2> /opt/mass-compare/install-logs/markit-ai.stderr.log; then \
+      echo "ok markit-ai"; \
+    else \
+      echo "WARNING: failed to install markit-ai" >&2; \
+      cat /opt/mass-compare/install-logs/markit-ai.stderr.log >&2 || true; \
+    fi; \
+    if curl -fsSL -o /opt/tabula/tabula.jar https://github.com/tabulapdf/tabula-java/releases/download/v1.0.5/tabula-1.0.5-jar-with-dependencies.jar > /opt/mass-compare/install-logs/tabula.stdout.log 2> /opt/mass-compare/install-logs/tabula.stderr.log; then \
+      echo "ok tabula-java"; \
+    else \
+      echo "WARNING: failed to download tabula-java jar" >&2; \
+      cat /opt/mass-compare/install-logs/tabula.stderr.log >&2 || true; \
+    fi
+
+WORKDIR /work
+CMD ["python3", "--version"]

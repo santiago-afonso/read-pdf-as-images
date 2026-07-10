@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  TARGET=$(readlink "$SOURCE")
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE=$TARGET
+  else
+    SOURCE=$DIR/$TARGET
+  fi
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+
+if [ -n "${READ_PDF_REPO_ROOT:-}" ]; then
+  REPO_ROOT=$READ_PDF_REPO_ROOT
+else
+  REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+fi
+
+DOCLING_CONVERT_PY="${REPO_ROOT}/benchmark/pdf/docling_convert.py"
+if [ ! -f "$DOCLING_CONVERT_PY" ]; then
+  echo "ERROR: cannot find benchmark/pdf/docling_convert.py." >&2
+  echo "Set READ_PDF_REPO_ROOT to the read-pdf repository root, or run this wrapper from the source checkout." >&2
+  exit 3
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "ERROR: uv is required to run pdf-docling-convert from source." >&2
+  echo "Install uv or run: python ${DOCLING_CONVERT_PY} --help" >&2
+  exit 3
+fi
+
+UV_WITH=(
+  --with 'docling==2.111.0'
+  --with easyocr
+  --with tiktoken
+  --with pillow
+)
+
+if [ "${PDF_DOCLING_HEAVY_DEPS:-0}" = "1" ]; then
+  UV_WITH+=(
+    --with bitsandbytes
+    --with accelerate
+  )
+fi
+
+if [ -n "${PDF_DOCLING_TRANSFORMERS_SPEC:-}" ]; then
+  UV_WITH+=(--with "$PDF_DOCLING_TRANSFORMERS_SPEC")
+fi
+
+# The machine-wide uv policy excludes packages uploaded in the most recent
+# seven days.  Permit the explicitly pinned Docling release (and its exact
+# docling-slim dependency) through that cutoff without relaxing it for the
+# rest of the transient runtime.
+UV_RUN_ARGS=(
+  --no-project
+  --exclude-newer-package 'docling=2026-07-10'
+  --exclude-newer-package 'docling-slim=2026-07-10'
+)
+if [ "${PDF_DOCLING_UV_OFFLINE:-0}" = "1" ]; then
+  UV_RUN_ARGS+=(--offline)
+fi
+
+exec uv run \
+  "${UV_RUN_ARGS[@]}" \
+  "${UV_WITH[@]}" \
+  python "$DOCLING_CONVERT_PY" "$@"

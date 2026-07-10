@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  TARGET=$(readlink "$SOURCE")
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE=$TARGET
+  else
+    SOURCE=$DIR/$TARGET
+  fi
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+
+if [ -n "${READ_PDF_REPO_ROOT:-}" ]; then
+  REPO_ROOT=$READ_PDF_REPO_ROOT
+else
+  REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+fi
+
+COMPARE_PY="${REPO_ROOT}/benchmark/pdf/table_image_compare.py"
+if [ ! -f "$COMPARE_PY" ]; then
+  echo "ERROR: cannot find benchmark/pdf/table_image_compare.py." >&2
+  echo "Set READ_PDF_REPO_ROOT to the read-pdf repository root, or run this wrapper from the source checkout." >&2
+  exit 3
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "ERROR: uv is required to run pdf-table-image-compare from source." >&2
+  echo "Install uv or run: python ${COMPARE_PY} --help" >&2
+  exit 3
+fi
+
+exec uv run --frozen python "$COMPARE_PY" "$@"

@@ -1,0 +1,15 @@
+FROM localhost/read-pdf-mass-compare:alpine
+
+ENV PATH="/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+RUN /opt/venv/bin/pip install --no-cache-dir \
+    mail-parser \
+    pylatexenc \
+    marko \
+    python-docx \
+    rtree \
+    beautifulsoup4 \
+    tiktoken
+
+WORKDIR /work
+CMD ["/opt/venv/bin/python", "--version"]

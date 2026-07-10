@@ -4,6 +4,12 @@ SCRIPT := scripts/read-pdf
 TARGET := $(BINDIR)/read-pdf
 LEGACY_SCRIPT := scripts/read-pdf-as-images
 LEGACY_TARGET := $(BINDIR)/read-pdf-as-images
+MASS_COMPARE_SCRIPT := scripts/pdf-mass-compare
+MASS_COMPARE_TARGET := $(BINDIR)/pdf-mass-compare
+TABLE_IMAGE_COMPARE_SCRIPT := scripts/pdf-table-image-compare
+TABLE_IMAGE_COMPARE_TARGET := $(BINDIR)/pdf-table-image-compare
+CANONICAL_BUNDLE_SCRIPT := scripts/pdf-canonical-bundle
+CANONICAL_BUNDLE_TARGET := $(BINDIR)/pdf-canonical-bundle
 HELPER_SCRIPTS := scripts/read_pdf_text.py scripts/read_pdf_structure.py scripts/read_pdf_search.py scripts/read_pdf_page_candidates.py scripts/truncate_text_output.py
 HELPER_TARGETS := $(addprefix $(BINDIR)/,$(notdir $(HELPER_SCRIPTS)))
 PRIME_CACHE ?= 1
@@ -13,7 +19,7 @@ PRIME_CACHE ?= 1
 
 help:
 	@echo "Targets:"
-	@echo "  install    Install CLI to $(TARGET) (and legacy wrapper to $(LEGACY_TARGET))"
+	@echo "  install    Install CLI to $(TARGET), benchmark tools, and legacy wrapper to $(LEGACY_TARGET)"
 	@echo "            (default: checks fast-engine runtime + primes uv cache; set PRIME_CACHE=0 to skip)"
 	@echo "  install-dev Symlink CLI + helpers into $(BINDIR) (dev mode: no stale installs)"
 	@echo "  uninstall  Remove installed CLI"
@@ -22,12 +28,36 @@ help:
 	@echo "  test       Generate a tiny PDF and run an integration smoke test"
 	@echo "  help       Show this message"
 
-install: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
+install: $(SCRIPT) $(LEGACY_SCRIPT) $(MASS_COMPARE_SCRIPT) $(TABLE_IMAGE_COMPARE_SCRIPT) $(CANONICAL_BUNDLE_SCRIPT) $(HELPER_SCRIPTS)
 	@mkdir -p "$(BINDIR)"
 	install -m 0755 "$(SCRIPT)" "$(TARGET)"
 	install -m 0755 "$(LEGACY_SCRIPT)" "$(LEGACY_TARGET)"
+	@{ \
+		echo '#!/usr/bin/env bash'; \
+		echo 'set -euo pipefail'; \
+		echo 'export READ_PDF_REPO_ROOT="$(abspath .)"'; \
+		echo 'exec "$(abspath $(MASS_COMPARE_SCRIPT))" "$$@"'; \
+	} > "$(MASS_COMPARE_TARGET)"
+	chmod 0755 "$(MASS_COMPARE_TARGET)"
+	@{ \
+		echo '#!/usr/bin/env bash'; \
+		echo 'set -euo pipefail'; \
+		echo 'export READ_PDF_REPO_ROOT="$(abspath .)"'; \
+		echo 'exec "$(abspath $(TABLE_IMAGE_COMPARE_SCRIPT))" "$$@"'; \
+	} > "$(TABLE_IMAGE_COMPARE_TARGET)"
+	chmod 0755 "$(TABLE_IMAGE_COMPARE_TARGET)"
+	@{ \
+		echo '#!/usr/bin/env bash'; \
+		echo 'set -euo pipefail'; \
+		echo 'export READ_PDF_REPO_ROOT="$(abspath .)"'; \
+		echo 'exec "$(abspath $(CANONICAL_BUNDLE_SCRIPT))" "$$@"'; \
+	} > "$(CANONICAL_BUNDLE_TARGET)"
+	chmod 0755 "$(CANONICAL_BUNDLE_TARGET)"
 	install -m 0755 $(HELPER_SCRIPTS) "$(BINDIR)"
 	@echo "Installed: $(TARGET)"
+	@echo "Installed mass comparator: $(MASS_COMPARE_TARGET)"
+	@echo "Installed table/image comparator: $(TABLE_IMAGE_COMPARE_TARGET)"
+	@echo "Installed canonical bundle tool: $(CANONICAL_BUNDLE_TARGET)"
 	@echo "Installed legacy wrapper: $(LEGACY_TARGET)"
 	@echo "Installed helpers: $(HELPER_TARGETS)"
 	@command -v read-pdf >/dev/null 2>&1 || \
@@ -38,28 +68,34 @@ install: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
 	    echo "Note: cache priming failed (likely no network). Re-run later with: make prime-cache" ; \
 	fi
 
-install-dev: $(SCRIPT) $(LEGACY_SCRIPT) $(HELPER_SCRIPTS)
+install-dev: $(SCRIPT) $(LEGACY_SCRIPT) $(MASS_COMPARE_SCRIPT) $(TABLE_IMAGE_COMPARE_SCRIPT) $(CANONICAL_BUNDLE_SCRIPT) $(HELPER_SCRIPTS)
 	@mkdir -p "$(BINDIR)"
 	ln -sf "$(abspath $(SCRIPT))" "$(TARGET)"
 	ln -sf "$(abspath $(LEGACY_SCRIPT))" "$(LEGACY_TARGET)"
+	ln -sf "$(abspath $(MASS_COMPARE_SCRIPT))" "$(MASS_COMPARE_TARGET)"
+	ln -sf "$(abspath $(TABLE_IMAGE_COMPARE_SCRIPT))" "$(TABLE_IMAGE_COMPARE_TARGET)"
+	ln -sf "$(abspath $(CANONICAL_BUNDLE_SCRIPT))" "$(CANONICAL_BUNDLE_TARGET)"
 	@for f in $(HELPER_SCRIPTS); do \
 		ln -sf "$$(cd "$$(dirname "$$f")" && pwd)/$$(basename "$$f")" "$(BINDIR)/$$(basename "$$f")"; \
 	done
 	@echo "Symlinked: $(TARGET)"
 	@echo "Symlinked legacy wrapper: $(LEGACY_TARGET)"
+	@echo "Symlinked mass comparator: $(MASS_COMPARE_TARGET)"
+	@echo "Symlinked table/image comparator: $(TABLE_IMAGE_COMPARE_TARGET)"
+	@echo "Symlinked canonical bundle tool: $(CANONICAL_BUNDLE_TARGET)"
 	@echo "Symlinked helpers: $(HELPER_TARGETS)"
 	@echo "Note: this is for development; move/rename the repo and the links will break."
 
 uninstall:
-	@rm -f "$(TARGET)" "$(LEGACY_TARGET)" $(HELPER_TARGETS)
-	@echo "Removed: $(TARGET), $(LEGACY_TARGET), and helper scripts"
+	@rm -f "$(TARGET)" "$(LEGACY_TARGET)" "$(MASS_COMPARE_TARGET)" "$(TABLE_IMAGE_COMPARE_TARGET)" "$(CANONICAL_BUNDLE_TARGET)" $(HELPER_TARGETS)
+	@echo "Removed: $(TARGET), $(LEGACY_TARGET), $(MASS_COMPARE_TARGET), $(TABLE_IMAGE_COMPARE_TARGET), $(CANONICAL_BUNDLE_TARGET), and helper scripts"
 
 prime-cache:
 	@$(MAKE) install PRIME_CACHE=0
 	@READ_PDF_UV_OFFLINE=0 "$(TARGET)" --prime-cache
 
 lint:
-	@shellcheck $(SCRIPT) $(LEGACY_SCRIPT)
+	@shellcheck $(SCRIPT) $(LEGACY_SCRIPT) $(MASS_COMPARE_SCRIPT) $(TABLE_IMAGE_COMPARE_SCRIPT) $(CANONICAL_BUNDLE_SCRIPT)
 
 test: install
 	@mkdir -p tmp

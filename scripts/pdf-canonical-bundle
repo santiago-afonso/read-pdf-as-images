@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE=${BASH_SOURCE[0]}
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  TARGET=$(readlink "$SOURCE")
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE=$TARGET
+  else
+    SOURCE=$DIR/$TARGET
+  fi
+done
+SCRIPT_DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+
+if [ -n "${READ_PDF_REPO_ROOT:-}" ]; then
+  REPO_ROOT=$READ_PDF_REPO_ROOT
+else
+  REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+fi
+
+CANONICAL_BUNDLE_PY="${REPO_ROOT}/benchmark/pdf/canonical_bundle.py"
+if [ ! -f "$CANONICAL_BUNDLE_PY" ]; then
+  echo "ERROR: cannot find benchmark/pdf/canonical_bundle.py." >&2
+  echo "Set READ_PDF_REPO_ROOT to the read-pdf repository root, or run this wrapper from the source checkout." >&2
+  exit 3
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "ERROR: uv is required to run pdf-canonical-bundle from source." >&2
+  echo "Install uv or run: python ${CANONICAL_BUNDLE_PY} --help" >&2
+  exit 3
+fi
+
+exec uv run --with pillow --with pymupdf --with tiktoken python "$CANONICAL_BUNDLE_PY" "$@"
